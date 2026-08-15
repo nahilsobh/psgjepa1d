@@ -55,8 +55,8 @@ def main():
     if heads is not None:
         print(f"[grounding] weight={g['weight']} params={sum(p.numel() for p in heads.parameters())/1e6:.2f}M")
     params = list(m.parameters()) + (list(heads.parameters()) if heads else [])
-    opt = torch.optim.AdamW(params, lr=cfg['optimizer']['lr'],
-                            weight_decay=cfg['optimizer']['weight_decay'])
+    opt = torch.optim.AdamW(params, lr=float(cfg['optimizer']['lr']),
+                        weight_decay=float(cfg['optimizer']['weight_decay']))
     E = cfg['trainer']['max_epochs']; bs = cfg['trainer']['batch_size']
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, E)
     lc = dict(reg_type=cfg['loss']['reg_type'], reg_weight=cfg['loss']['reg_weight'],
