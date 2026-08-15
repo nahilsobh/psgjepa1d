@@ -1,0 +1,13 @@
+This project is a derivative work of PSG-JEPA
+    https://github.com/Haodong-Yan/PSG-JEPA
+    Yan et al., "Is Forward Prediction Enough? Physical State Grounding for JEPA World Models",
+    arXiv:2608.06799 (2026)
+
+psgjepa1d/grounding.py is a close port of psgjepa/grounding.py from that repository, adapted from
+a robot-arm state space to a 1-D longitudinal car state space. Its structure, the per-horizon
+weighting of the transition loss, and the optional velocity head follow the original.
+
+BEFORE PUBLISHING: check the upstream LICENSE and comply with its terms. The MIT LICENSE in this
+repository covers only the newly written 1-D world, data synthesis, evaluation and documentation.
+If the upstream licence requires different terms for derivative work, replace or supplement the
+LICENSE file accordingly.

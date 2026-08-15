@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.npz
+*.egg-info/
+.venv/
+venv/
+results*.json
+psgjepa1d_run*.json
+window_cache.npz

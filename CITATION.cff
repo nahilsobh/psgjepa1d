@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: PSG-JEPA-1D
+message: >-
+  Parallel implementation of PSG-JEPA on an exactly-solvable 1-D car world.
+type: software
+abstract: >-
+  A 1-D longitudinal-control world whose optimal solution is exactly computable, used to measure
+  physical state grounding for JEPA world models against an absolute reference rather than
+  relative planning success. Derived from PSG-JEPA (Yan et al., arXiv:2608.06799).
+references:
+  - type: article
+    title: "Is Forward Prediction Enough? Physical State Grounding for JEPA World Models"
+    authors:
+      - family-names: Yan
+        given-names: Haodong
+    year: 2026
+    identifiers:
+      - type: other
+        value: arXiv:2608.06799

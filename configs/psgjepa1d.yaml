@@ -1,0 +1,36 @@
+# PSG-JEPA-1D — mirrors PSG-JEPA/configs/psgjepa.yaml, adapted to the 1-D car.
+output_model_name: psgjepa1d
+seed: 3072
+
+data:
+  n_windows: 2000000        # exact-physics windows (synthesised, not downloaded)
+  window_T: 7               # T frames  => horizons k = 1..6   (upstream used T=4)
+  normaliser: phys          # 'phys' (physics non-dimensional) | 'sd' (sample std)
+
+trainer:
+  max_epochs: 30
+  batch_size: 4096
+  precision: bf16
+
+optimizer:
+  type: AdamW
+  lr: 3e-3                  # small MLPs, not a ViT -> larger lr than upstream 5e-5
+  weight_decay: 1e-3
+
+wm:
+  embed_dim: 64             # upstream 192 (ViT-Tiny); swept in the arch experiment
+  hidden: 512
+
+loss:
+  reg_type: sigreg          # sigreg | vicreg | barlow | visreg | stopgrad
+  reg_weight: 0.09          # LeWM value, kept unchanged
+  grounding:
+    weight: 0.1             # lambda_g  (upstream value)
+    hidden_dim: 256
+    use_velocity: true      # ON by default upstream
+    use_static: true        # ablation: set false to drop H_s
+    use_transition: true    # ablation: set false to drop H_d
+    # 1-D car state layout:  [gap, v, a]
+    state_idx: [0, 1, 2]    # s_t : full physical state
+    joint_idx: [0]          # q_t : position-like coordinate (gap)  -> multi-horizon Delta
+    vel_idx:   [1]          # velocity target

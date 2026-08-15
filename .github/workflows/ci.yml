@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install numpy pyyaml torch --index-url https://download.pytorch.org/whl/cpu
+      - name: physics + data integrity (no GPU needed)
+        run: python -m tests.test_world
+      - name: grounding + ablation arms
+        run: python -m tests.test_grounding
+      - name: smoke train (tiny)
+        run: python train.py data.n_windows=2000 trainer.max_epochs=1 trainer.batch_size=256
