@@ -1,36 +1,49 @@
 # Pushing this repo
 
-I cannot push from my environment (no credentials, and GitHub blocks automated access).
-Run these on your side.
-
-## New repo
+The repo is already initialised with a commit on `main`. I cannot push from my environment
+(no credentials, and GitHub blocks automated access), so run these two commands:
 
 ```bash
-unzip psgjepa1d.zip && cd psgjepa1d
-git init -b main
-git add -A
-git commit -m "PSG-JEPA-1D: physical state grounding on an exactly-solvable 1-D car world
-
-Parallel implementation of PSG-JEPA (Yan et al., arXiv:2608.06799).
-- psgjepa1d/grounding.py is a faithful port (per-horizon weighting, velocity head)
-- the 1-D world has an exactly computable optimum (0.0129 m), so grounding can be
-  measured against an absolute reference rather than relative planning success
-- adds E1-E4 error localisation, compounding ratio, and a GL(d) gauge test"
-git remote add origin git@github.com:<YOU>/psgjepa1d.git   # or https://...
+cd psgjepa1d
+git remote add origin git@github.com:<YOU>/psgjepa1d.git    # or https://github.com/<YOU>/psgjepa1d.git
 git push -u origin main
 ```
 
-## Attribution — please keep
+## First, set the author on the commit
 
-This is a derivative of https://github.com/Haodong-Yan/PSG-JEPA. Before making it public:
+The commit was created with a placeholder identity. Fix it before pushing:
 
-1. Check that repo's LICENSE and comply with it. The `grounding.py` port follows its structure
-   closely and is derivative work — the MIT file here covers only the new 1-D code, and should be
-   replaced or supplemented if their terms require it.
-2. Keep the citation in README.md.
-3. `git log` will show me as neither author nor committer — the commit is yours.
+```bash
+git config user.name  "Your Name"
+git config user.email "you@example.com"
+git commit --amend --reset-author --no-edit
+```
 
-## Also worth pushing
+## Before making it public — please read NOTICE
 
-`jepa1d_gpu_package.zip` (the cluster experiment runner) is a separate, self-contained project.
-I'd keep it in its own repo rather than mixing it with this one.
+This is **derivative work** of https://github.com/Haodong-Yan/PSG-JEPA.
+`psgjepa1d/grounding.py` is a close port of their `psgjepa/grounding.py`.
+
+1. Check the upstream LICENSE and comply with it.
+2. The MIT `LICENSE` here covers only the newly written 1-D code. If upstream terms require
+   different terms for derivatives, replace or supplement it.
+3. Keep the citation in `README.md` and `CITATION.cff`.
+
+## CI
+
+`.github/workflows/ci.yml` runs on push:
+- `tests/test_world.py`      — physics + data integrity (NumPy only)
+- `tests/test_grounding.py`  — grounding shapes, ablation arms, horizon-weighting regression
+- a tiny smoke train
+
+CI installs CPU torch, so it will not exercise the GPU path.
+
+## Smoke test before any long run
+
+```bash
+python train.py loss.grounding.weight=0.0 data.n_windows=50000 trainer.max_epochs=2
+```
+
+This exercises the default `sigreg` regulariser, autograd, and the data pipeline in ~1 minute.
+Neither has been executed in the authoring environment (torch was not installable there) — see
+the verification table in README.md for exactly what was and was not checked.
