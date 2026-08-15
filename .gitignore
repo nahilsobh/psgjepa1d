@@ -8,3 +8,4 @@ venv/
 results*.json
 psgjepa1d_run*.json
 window_cache.npz
+.DS_Store
