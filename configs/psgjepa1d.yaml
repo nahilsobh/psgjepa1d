@@ -14,7 +14,7 @@ trainer:
 
 optimizer:
   type: AdamW
-  lr: 3.0e-3                  # small MLPs, not a ViT -> larger lr than upstream 5e-5
+  lr: 1.0e-3                  # 3e-3 was unstable in practice (loss 0.9 -> 9000); 1e-3 converges
   weight_decay: 1.0e-3
 
 wm:

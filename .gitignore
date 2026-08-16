@@ -6,7 +6,9 @@ __pycache__/
 .venv/
 venv/
 results*.json
+eval_results*.json
 psgjepa1d_run*.json
 window_cache.npz
+logs/
 .DS_Store
 .DS_Store

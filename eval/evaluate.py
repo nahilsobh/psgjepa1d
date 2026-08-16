@@ -35,24 +35,37 @@ def probes(m, dev, sm, ss, n=40000, seed=5):
     return out
 
 @torch.no_grad()
-def fit_decoder(m, D, dev, K=6, width=1024, n=150000, epochs=40, bs=16384, lr=3e-3, seed=1):
+def fit_decoder(m, D, dev, K=6, width=1024, n=400000, epochs=100, bs=16384,
+                lr=1e-3, weight_decay=1e-5, val_frac=0.1, seed=1, verbose=True):
     torch.manual_seed(seed)
     S, U = D['states'], D['actions']
+    n = min(n, len(S))
     idx = torch.randperm(len(S), device=dev)[:n]
     z = m.encode(S[idx,0]); Zs=[]; Ys=[]
     for k in range(min(K, S.shape[1]-1)):
         z = m.predict(z, U[idx,k]); Zs.append(z); Ys.append(S[idx,k+1])
     Z=torch.cat(Zs); Y=torch.cat(Ys)
+    # train/val split for observability
+    nv = int(val_frac * len(Z))
+    pm = torch.randperm(len(Z), device=dev)
+    val_idx, tr_idx = pm[:nv], pm[nv:]
+    Zt, Yt = Z[tr_idx], Y[tr_idx]
+    Zv, Yv = Z[val_idx], Y[val_idx]
     dec = nn.Sequential(nn.Linear(m.embed_dim,width), nn.GELU(),
                         nn.Linear(width,width), nn.GELU(), nn.Linear(width,3)).to(dev)
     with torch.enable_grad():
-        opt=torch.optim.Adam(dec.parameters(), lr=lr)
-        for _ in range(epochs):
-            pm=torch.randperm(len(Z),device=dev)
-            for st in range(0,len(Z),bs):
-                b=pm[st:st+bs]; l=((dec(Z[b])-Y[b])**2).mean()
+        opt=torch.optim.AdamW(dec.parameters(), lr=lr, weight_decay=weight_decay)
+        for ep in range(epochs):
+            pm=torch.randperm(len(Zt),device=dev)
+            for st in range(0,len(Zt),bs):
+                b=pm[st:st+bs]; l=((dec(Zt[b])-Yt[b])**2).mean()
                 opt.zero_grad(set_to_none=True); l.backward(); opt.step()
-    return dec.eval()
+    dec.eval()
+    val_mse = ((dec(Zv)-Yv)**2).mean(0).detach().cpu().numpy()  # per-channel [gap,v,a] in normalised units
+    if verbose:
+        print(f"  decoder val MSE (normalised): gap={val_mse[0]:.5f} v={val_mse[1]:.5f} a={val_mse[2]:.5f}"
+              f"  (n_train={len(Zt)}, n_val={len(Zv)}, epochs={epochs})", flush=True)
+    return dec
 
 @torch.no_grad()
 def taxonomy(m, dec, dev, sm, ss, um, us, n=4000, seed=9):
