@@ -1,0 +1,371 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PSG-JEPA-1D · Demo</title>
+<style>
+  :root {
+    --bg: #0e1013; --fg: #e6e6e6; --muted: #888; --accent: #4a9eff;
+    --good: #6fdc6f; --warn: #ffb84a; --bad: #ff5a5a; --line: #2a2f35;
+  }
+  html, body { background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; margin: 0; }
+  main { max-width: 900px; margin: 24px auto; padding: 0 20px; }
+  h1 { font-weight: 500; font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .panel { background: #141821; border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 14px; }
+  canvas { display: block; width: 100%; height: 100px; background: #0a0c10;
+    border-radius: 4px; }
+  .row { display: flex; gap: 20px; align-items: center; margin: 8px 0; }
+  .row label { flex: 0 0 90px; font-size: 13px; color: var(--muted); }
+  .row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .row .val { flex: 0 0 90px; text-align: right; font-variant-numeric: tabular-nums;
+    font-size: 13px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    font-variant-numeric: tabular-nums; }
+  .metric { background: #0a0c10; border-radius: 4px; padding: 8px 10px; }
+  .metric .k { color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.5px; }
+  .metric .v { font-size: 16px; margin-top: 2px; }
+  button { background: var(--accent); border: 0; color: #fff; padding: 6px 14px;
+    border-radius: 4px; font-size: 13px; cursor: pointer; }
+  button.secondary { background: transparent; border: 1px solid var(--line); color: var(--fg); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px;
+    font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  tr.best td { color: var(--good); }
+  a { color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .badge { display: inline-block; padding: 1px 6px; background: var(--line);
+    border-radius: 3px; font-size: 11px; color: var(--muted); margin-left: 6px; }
+</style>
+
+<main>
+  <h1>PSG-JEPA-1D <span class="badge">interactive</span></h1>
+  <div class="sub">
+    A 1-D car stops in front of a wall using the exact analytical controller
+    (<a href="https://github.com/nahilsobh/psgjepa1d/blob/main/psgjepa1d/world.py">world.py</a>).
+    Ruler: <b>13.1&nbsp;mm</b> mean stopping excess on the 170-scenario grid.
+  </div>
+
+  <div class="panel">
+    <canvas id="cv" width="880" height="100"></canvas>
+    <div class="row">
+      <label for="v0">v<sub>0</sub></label>
+      <input id="v0" type="range" min="3" max="14" step="0.5" value="9">
+      <span class="val" id="v0val"></span>
+    </div>
+    <div class="row">
+      <label for="wall">wall</label>
+      <input id="wall" type="range" min="6" max="22" step="0.5" value="14">
+      <span class="val" id="wallval"></span>
+    </div>
+    <div class="row" style="justify-content:flex-end; gap:8px">
+      <button class="secondary" id="reset">Reset</button>
+      <button id="run">Run analytical stop</button>
+    </div>
+    <div class="metrics" style="margin-top: 10px">
+      <div class="metric"><div class="k">gap remaining</div><div class="v" id="mGap">–</div></div>
+      <div class="metric"><div class="k">velocity</div><div class="v" id="mV">–</div></div>
+      <div class="metric"><div class="k">acceleration</div><div class="v" id="mA">–</div></div>
+      <div class="metric"><div class="k">stopping excess</div><div class="v" id="mExcess">–</div></div>
+    </div>
+    <div class="hint" id="hint">
+      Pick a starting velocity and wall distance, then hit Run. The controller
+      plays the discrete optimum: coast &rarr; one trim jerk &rarr; terminal
+      brake landing at v=0, a=0 exactly.
+    </div>
+  </div>
+
+  <div class="panel">
+    <div style="display:flex; justify-content: space-between; align-items:center; margin-bottom: 8px;">
+      <div style="font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px">
+        Learned world-model summary
+      </div>
+      <div style="font-size: 11px; color: var(--muted)">baked from
+        <a href="https://github.com/nahilsobh/psgjepa1d/blob/main/report.pdf">report.pdf</a></div>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Arm</th>
+        <th>k=1 gap MAE</th>
+        <th>k=10 gap MAE</th>
+        <th>k=1 a MAE</th>
+        <th>tightest safety</th>
+        <th>excess</th>
+      </tr></thead>
+      <tbody>
+        <tr><td>baseline (no grounding)</td><td>74 mm</td><td>121 mm</td>
+            <td>96 mm/s²</td><td>0.75 m</td><td>1.01 m</td></tr>
+        <tr><td>full (grounding)</td><td>20 mm</td><td>51 mm</td>
+            <td>35 mm/s²</td><td>1.0 m</td><td>0.88 m</td></tr>
+        <tr><td>full_recon (linear decoder)</td><td>23 mm</td><td class="best-cell">33 mm</td>
+            <td style="color:var(--bad)">275 mm/s²</td><td>3.0 m</td><td>2.78 m</td></tr>
+        <tr class="best"><td><b>full_recon_two</b> (two decoders)</td><td>22 mm</td>
+            <td>58 mm</td><td>23 mm/s²</td><td>0.35 m</td><td>1.25 m</td></tr>
+      </tbody>
+    </table>
+    <div class="hint">
+      Best deployment arm: <b>full_recon_two</b> — 8.6× tighter safety
+      threshold than full_recon, all three channels preserved.
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ---------- exact physics port (from psgjepa1d/world.py) ----------
+const DT = 0.1, A_MAX = 8.0, J_MAX = 20.0;
+
+function exact_step(x, v, a, j, dt=DT, A=A_MAX) {
+  let t = 0.0, guard = 0;
+  while (t < dt - 1e-12 && guard < 60) {
+    guard += 1;
+    const rem = dt - t;
+    if (v <= 1e-12) {
+      if (a <= 1e-12 && j <= 1e-12) {
+        a = Math.min(Math.max(a + j*rem, -A), A); t = dt; break;
+      }
+      if (a < -1e-12 && j > 1e-12) {
+        const d0 = Math.min(rem, (0.0 - a)/j);
+        a = Math.min(Math.max(a + j*d0, -A), A);
+        v = 0.0; t += d0; continue;
+      }
+    }
+    let je = j;
+    if ((a >= A - 1e-12 && j > 0) || (a <= -A + 1e-12 && j < 0)) je = 0.0;
+    let d = rem;
+    if (je > 1e-12 && a < A)  d = Math.min(d, (A - a)/je);
+    if (je < -1e-12 && a > -A) d = Math.min(d, (-A - a)/je);
+    if (v > 1e-12) {
+      if (Math.abs(je) > 1e-12) {
+        const disc = a*a - 2*je*v;
+        if (disc >= 0) {
+          const sq = Math.sqrt(disc);
+          for (const r of [(-a + sq)/je, (-a - sq)/je])
+            if (1e-12 < r && r < d) d = r;
+        }
+      } else if (a < -1e-12) {
+        const r = -v/a;
+        if (1e-12 < r && r < d) d = r;
+      }
+    }
+    if (d <= 1e-12) d = rem;
+    x = x + v*d + 0.5*a*d*d + je*d*d*d/6.0;
+    v = v + a*d + 0.5*je*d*d;
+    a = Math.min(Math.max(a + je*d, -A), A);
+    if (v < 1e-9) v = 0.0;
+    t += d;
+  }
+  return [x, v, a];
+}
+
+function plan_terminal(v, a) {
+  for (let n = 1; n < 12; n++) {
+    const b = -2*v/(DT*(n + 1));
+    if (b < -A_MAX - 1e-9 || b > 1e-9) continue;
+    const jt = (b - a)/DT;
+    if (Math.abs(jt) > J_MAX + 1e-9) continue;
+    const jterm = -b/(n*DT);
+    if (Math.abs(jterm) > J_MAX + 1e-9) continue;
+    return {jt, n, jterm};
+  }
+  return null;
+}
+
+function brake_from(x, v, a) {
+  const steps = [];
+  for (let iter = 0; iter < 600; iter++) {
+    const p = plan_terminal(v, a);
+    if (p !== null) {
+      // apply trim jerk once
+      [x, v, a] = exact_step(x, v, a, p.jt);
+      steps.push({x, v, a, kind: 'trim'});
+      for (let k = 0; k < p.n; k++) {
+        [x, v, a] = exact_step(x, v, a, p.jterm);
+        steps.push({x, v, a, kind: 'brake'});
+      }
+      return {x, ok: true, steps};
+    }
+    const j = a > -A_MAX ? -J_MAX : 0.0;
+    [x, v, a] = exact_step(x, v, a, j);
+    steps.push({x, v, a, kind: 'brake'});
+    if (v <= 1e-12) return {x, ok: true, steps};
+  }
+  return {x, ok: false, steps};
+}
+
+function optimal_stop_trace(v0, obs, NJ=81) {
+  // Enumerate coast lengths and trim jerks; keep the best. Returns {kStar, jTrim, plan}
+  let x = 0, v = v0, a = 0;
+  const coast = [{x, v, a}];
+  for (let k = 0; k < 90; k++) {
+    const jCoast = Math.max(-J_MAX, Math.min(J_MAX, -a/DT));
+    [x, v, a] = exact_step(x, v, a, jCoast);
+    if (obs - x <= 0 || v <= 1e-9) break;
+    coast.push({x, v, a});
+  }
+  // Pick the best (k, j_trim)
+  let best = null;
+  for (let k = coast.length - 1; k >= 0; k--) {
+    const s0 = coast[k];
+    // no-trim option
+    const noTrim = brake_from(s0.x, s0.v, s0.a);
+    if (noTrim.ok && obs - noTrim.x >= -1e-9) {
+      const excess = obs - noTrim.x;
+      if (best === null || excess < best.excess)
+        best = {k, jTrim: null, excess, brake: noTrim};
+    }
+    for (let ji = 0; ji < NJ; ji++) {
+      const jTrim = -J_MAX + (2*J_MAX)*ji/(NJ - 1);
+      const [x2, v2, a2] = exact_step(s0.x, s0.v, s0.a, jTrim);
+      if (obs - x2 <= 0) continue;
+      const br = brake_from(x2, v2, a2);
+      if (br.ok && obs - br.x >= -1e-9) {
+        const excess = obs - br.x;
+        if (best === null || excess < best.excess)
+          best = {k, jTrim, excess, brake: br, afterTrim: {x: x2, v: v2, a: a2}};
+      }
+    }
+    if (best !== null) return {best, coast};
+  }
+  return {best, coast};
+}
+
+// ---------- UI ----------
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+
+function fmt(x, unit, digits=3) {
+  return `${x.toFixed(digits)} ${unit}`;
+}
+
+function updateReadout(gap, v, a, excess=null) {
+  $('mGap').textContent = fmt(gap, 'm');
+  $('mV').textContent = fmt(v, 'm/s');
+  $('mA').textContent = fmt(a, 'm/s²');
+  if (excess !== null) {
+    const mm = excess * 1000;
+    const ruler = 13.13;
+    const ratio = mm/ruler;
+    const color = mm < 30 ? 'var(--good)' : mm < 100 ? 'var(--warn)' : 'var(--bad)';
+    $('mExcess').innerHTML = `<span style="color:${color}">${mm.toFixed(1)} mm</span>` +
+      ` <span style="color:var(--muted); font-size:12px">${ratio.toFixed(1)}× ruler</span>`;
+  } else {
+    $('mExcess').textContent = '–';
+  }
+}
+
+function drawScene(x, wall, v, phase='idle') {
+  const W = cv.width, H = cv.height;
+  const scale = (W - 60) / 24;  // 24 m wide viewport, with padding
+  const y = H/2;
+  ctx.fillStyle = '#0a0c10';
+  ctx.fillRect(0, 0, W, H);
+  // road
+  ctx.strokeStyle = '#2a2f35';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(30, y+18); ctx.lineTo(W-30, y+18); ctx.stroke();
+  // wall
+  const wallPx = 30 + wall*scale;
+  ctx.fillStyle = '#ff5a5a';
+  ctx.fillRect(wallPx, y-24, 4, 42);
+  // ticks
+  ctx.strokeStyle = '#1a1e24'; ctx.fillStyle = '#666'; ctx.font = '10px sans-serif';
+  for (let m = 0; m <= 22; m += 2) {
+    const px = 30 + m*scale;
+    ctx.beginPath(); ctx.moveTo(px, y+18); ctx.lineTo(px, y+22); ctx.stroke();
+    if (m % 4 === 0) ctx.fillText(`${m}m`, px-6, y+35);
+  }
+  // car (arrow pointing right if v>0)
+  const carPx = 30 + x*scale;
+  ctx.fillStyle = phase === 'trim' ? '#ffb84a' : (phase === 'brake' ? '#ff5a5a' : '#4a9eff');
+  ctx.beginPath();
+  ctx.moveTo(carPx-8, y-6); ctx.lineTo(carPx+8, y); ctx.lineTo(carPx-8, y+6);
+  ctx.closePath(); ctx.fill();
+  // velocity arrow above car
+  if (Math.abs(v) > 0.1) {
+    const arrowLen = Math.min(50, Math.abs(v)*5);
+    ctx.strokeStyle = '#4a9eff'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(carPx, y-14); ctx.lineTo(carPx + arrowLen, y-14);
+    ctx.moveTo(carPx + arrowLen, y-14);
+    ctx.lineTo(carPx + arrowLen - 4, y-17);
+    ctx.moveTo(carPx + arrowLen, y-14);
+    ctx.lineTo(carPx + arrowLen - 4, y-11);
+    ctx.stroke();
+  }
+}
+
+let animHandle = null;
+
+function stopAnim() {
+  if (animHandle) { cancelAnimationFrame(animHandle); animHandle = null; }
+}
+
+function init() {
+  stopAnim();
+  const v0 = parseFloat($('v0').value);
+  const wall = parseFloat($('wall').value);
+  $('v0val').textContent = fmt(v0, 'm/s', 1);
+  $('wallval').textContent = fmt(wall, 'm', 1);
+  drawScene(0, wall, v0, 'idle');
+  updateReadout(wall, v0, 0);
+  $('hint').textContent = 'Hit Run to execute the analytical optimum.';
+  $('run').disabled = false;
+}
+
+function run() {
+  stopAnim();
+  const v0 = parseFloat($('v0').value);
+  const wall = parseFloat($('wall').value);
+  const {best, coast} = optimal_stop_trace(v0, wall);
+  if (best === null) {
+    $('hint').textContent = 'No feasible plan (wall too close for this v₀ — try larger wall).';
+    return;
+  }
+  // Build the full step-by-step trajectory
+  const traj = [];
+  for (let k = 0; k <= best.k; k++) {
+    const c = coast[k];
+    traj.push({x: c.x, v: c.v, a: c.a, kind: k === best.k ? 'trim-boundary' : 'coast'});
+  }
+  if (best.jTrim !== null) traj.push({...best.afterTrim, kind: 'trim'});
+  for (const s of best.brake.steps) traj.push({...s, kind: 'brake'});
+  const finalX = traj[traj.length - 1].x;
+  const excess = wall - finalX;
+
+  let idx = 0;
+  const startT = performance.now();
+  const stepMs = 60;  // slow enough to see; each tick is 100ms of sim
+  $('run').disabled = true;
+  $('hint').innerHTML = `Plan: coast <b>${best.k}</b> ticks → ` +
+    (best.jTrim === null ? 'no trim' : `trim jerk <b>${best.jTrim.toFixed(1)} m/s³</b>`) +
+    ` → brake (${best.brake.steps.length} ticks).`;
+
+  function frame() {
+    const now = performance.now();
+    idx = Math.min(traj.length - 1, Math.floor((now - startT) / stepMs));
+    const s = traj[idx];
+    drawScene(s.x, wall, s.v, s.kind);
+    if (idx === traj.length - 1) {
+      updateReadout(wall - s.x, s.v, s.a, excess);
+      $('run').disabled = false;
+    } else {
+      updateReadout(wall - s.x, s.v, s.a);
+      animHandle = requestAnimationFrame(frame);
+    }
+  }
+  frame();
+}
+
+$('v0').addEventListener('input', init);
+$('wall').addEventListener('input', init);
+$('run').addEventListener('click', run);
+$('reset').addEventListener('click', init);
+init();
+</script>

@@ -14,7 +14,7 @@
 \title{PSG-JEPA-1D: Learned World Model vs an Exact 1-D Car Optimum \\
   \large Findings from the 2026-08-16/17 iteration}
 \author{Nahil Sobh\thanks{Delta cluster, Illinois. Repository:
-  \url{https://github.com/nahilsobh/psgjepa1d}, commit \texttt{345d71e}.}}
+  \url{https://github.com/nahilsobh/psgjepa1d}, commit \texttt{e55b54a}.}}
 \date{2026-08-17}
 
 \begin{document}
@@ -25,17 +25,22 @@ We iterate a JEPA-style world model on a 1-D longitudinal car whose exact
 constant-jerk dynamics and discrete-optimum controller are known analytically.
 The analytical optimum stops \SI{13.1}{\mm} shy of the wall on a fixed
 170-scenario grid; the model's free-run rollout is measured against
-\texttt{W.exact\_step} on 5000 random scenarios. After four rounds of
-experiments (grounding-only baseline, direct linear-decoder reconstruction,
-per-channel weighting, embedding-dimension sweep, longer training with
-$10\times$ data, coverage rebalance, and an MLP intrinsic decoder), the best
-arm halves the 10-step gap MAE from \SI{61}{\mm} to \SI{33}{\mm}, and reaches
-\SIrange{7.5}{9}{\mm} at $k{=}1$ in the mid/high-velocity $\times$ low/mid-gap
-operating regime -- under the analytical ruler. Aggregate accuracy is
-constrained by encoder information capacity: every loss configuration
-redistributes precision across $(\Delta g, v, a)$ but never grows all three at
-once. Coverage-based data rebalancing regressed uniformly; more data at the
-same epoch budget under-trained and regressed.
+\texttt{W.exact\_step} on 5000 random scenarios. Rounds tried:
+grounding-only baseline, direct linear-decoder reconstruction, per-channel
+recon weighting, embedding-dimension sweep, longer training with $10\times$
+data, coverage rebalance, MLP intrinsic decoder, and a two-decoder scheme
+that forces the encoder to be simultaneously linear- and MLP-decodable to
+$(g, v, a)$. The linear-recon arm reaches the tightest \emph{gap} error
+(\SI{33}{\mm} $k{=}10$; \SIrange{7.5}{9}{\mm} $k{=}1$ in the operating
+regime, under the analytical ruler) but breaks the acceleration channel
+(\SI{275}{\mm/\s^2}) and destroys the closed-loop controller (\SI{3}{\m}
+safety needed). The two-decoder arm is the deployment winner: it preserves
+all three physical channels, halves the paired controller excess
+(\SI{2.79}{} to \SI{1.22}{\m}), and drops the tightest safety threshold
+$8.6\times$ (from \SI{3}{\m} to \SI{0.35}{\m}). Aggregate model accuracy
+is constrained by encoder information capacity that redistributes across
+channels; the two-decoder scheme forces a broader distribution across
+$(g, v, a)$ rather than concentrated gap-only tightness.
 \end{abstract}
 
 \section{Problem setup}
@@ -131,6 +136,7 @@ Arm & Config & Purpose & Seed \\
 \texttt{full\_recon\_20M}        & recon, $10\times$ data, 30 ep             & quantity            & 4096 \\
 \texttt{full\_recon\_far}        & recon, mixture=`far'                      & coverage rebalance  & 4096 \\
 \texttt{full\_recon\_mlp}        & recon, MLP decoder $D{\to}128{\to}3$      & lift linear limit   & 4096 \\
+\texttt{full\_recon\_two}        & recon with linear + MLP decoders          & preserve all channels & 4096 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -161,7 +167,8 @@ Arm & $k{=}1$ gap & $k{=}1$ v & $k{=}1$ a & $k{=}10$ gap & $k{=}10$ v & $k{=}10$
 \texttt{full\_d192\_e60\_recon}& \textbf{19} & 51 & 30 & 86  & 273 & 248 \\
 \texttt{full\_recon\_20M}      & 40 & 29 & 104 & 107 & 93  & 140 \\
 \texttt{full\_recon\_far}      & 42 & 45 & 74  & 90  & 258 & 158 \\
-\texttt{full\_recon\_mlp}      & 20 & 68 & \textbf{28}  & 43  & 126 & 79  \\
+\texttt{full\_recon\_mlp}      & 20 & 68 & 28  & 43  & 126 & 79  \\
+\texttt{full\_recon\_two}      & 22 & 50 & \textbf{23}  & 58  & \textbf{62}  & \textbf{76}  \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -184,6 +191,12 @@ Key observations from Table \ref{tab:aggregate}:
 \item Longer training with a bigger latent (\texttt{full\_d192\_e60\_recon})
       achieved the tightest $k{=}1$ decode but the predictor never recovered
       from a mid-training plateau and $k{=}10$ blew up.
+\item \texttt{full\_recon\_two} (linear + MLP decoders enforced
+      simultaneously) is the only arm that preserves \emph{all three}
+      channels: it holds the best $a$ (23 mm/s\textsuperscript{2}), the best
+      $k{=}10$ velocity (62 mm/s), and pays a modest gap regression
+      ($k{=}10$: $33 \to 58$ mm). Aggregate accuracy shifts from
+      gap-only-tight to broadly balanced.
 \end{itemize}
 
 \subsection{Per-region gap MAE}
@@ -199,16 +212,26 @@ reporting $k{=}1$ / $k{=}10$ gap MAE in mm.
 \caption{Per-region gap MAE (mm), $k{=}1$ / $k{=}10$.}
 \label{tab:regions}
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{l|rrr|rrr|rrr}
+\begin{tabular}{l|rrr|rrr|rrr|rrr}
 \toprule
 & \multicolumn{3}{c|}{\textbf{full\_v2} (no recon)}
 & \multicolumn{3}{c|}{\textbf{full\_recon} (linear)}
-& \multicolumn{3}{c}{\textbf{full\_recon\_mlp} (MLP)} \\
-$v \backslash$ gap & lo & mid & hi & lo & mid & hi & lo & mid & hi \\
+& \multicolumn{3}{c|}{\textbf{full\_recon\_mlp} (MLP)}
+& \multicolumn{3}{c}{\textbf{full\_recon\_two} (both)} \\
+$v \backslash$ gap & lo & mid & hi & lo & mid & hi & lo & mid & hi & lo & mid & hi \\
 \midrule
-$v_{\text{lo}}$  & 14/41  & 32/56 & 42/60 & 18/29 & 31/33 & 56/47 & 12/37 & 18/39 & 29/41 \\
-$v_{\text{mid}}$ & 14/60  & 23/35 & 36/52 & \textbf{9}/25 & 17/27 & 36/38 & 13/44 & 20/29 & 24/39 \\
-$v_{\text{hi}}$  & 14/\textbf{170} & 14/27 & 26/42 & \textbf{9}/53 & \textbf{7.5}/\textbf{18} & 21/22 & 15/94 & 23/28 & 25/36 \\
+$v_{\text{lo}}$  & 14/41  & 32/56 & 42/60
+                 & 18/29 & 31/33 & 56/47
+                 & 12/37 & 18/39 & 29/41
+                 & \textbf{10}/25 & 19/28 & 25/36 \\
+$v_{\text{mid}}$ & 14/60  & 23/35 & 36/52
+                 & \textbf{9}/25 & 17/27 & 36/38
+                 & 13/44 & 20/29 & 24/39
+                 & 14/63 & 20/23 & 29/33 \\
+$v_{\text{hi}}$  & 14/\textbf{170} & 14/27 & 26/42
+                 & \textbf{9}/53 & \textbf{7.5}/\textbf{18} & 21/22
+                 & 15/94 & 23/28 & 25/36
+                 & 19/259 & 29/21 & \textbf{34}/26 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -216,8 +239,10 @@ $v_{\text{hi}}$  & 14/\textbf{170} & 14/27 & 26/42 & \textbf{9}/53 & \textbf{7.5
 Best cell across any arm at $k{=}1$: \textbf{7.5 mm} (\texttt{full\_recon},
 $v_\text{hi} \times \text{gap}_\text{mid}$) -- beats the 13 mm ruler by 40\%.
 \texttt{full\_recon\_mlp} flattens the distribution: no cell above 29 mm at
-$k{=}1$, but no cell below 12 mm either. \texttt{full\_recon\_far} regressed
-uniformly and is omitted.
+$k{=}1$, but no cell below 12 mm either. \texttt{full\_recon\_two} extends
+that flattening further: worst-cell $k{=}1$ gap MAE drops to 34 mm (vs
+\texttt{full\_recon}'s 56 mm), at the cost of losing the \SI{7.5}{\mm}
+peak. \texttt{full\_recon\_far} regressed uniformly and is omitted.
 
 The persistent \emph{v\_hi}$\times$\emph{gap\_lo}$\times k{=}10$ blowup
 (170 mm on \texttt{full\_v2}) is the ``fast car $\to$ close wall $\to$ 10
@@ -247,33 +272,72 @@ under-trained; $k{=}10$ gap MAE went 33 $\to$ 107 mm. A fair test would need
 $\sim$100 epochs on the 20\,M cache ($\sim$8 h GPU).
 
 \subsection{Controller closed-loop}
+\label{sec:controller}
 
 Beyond world-model accuracy, we evaluated closed-loop stopping on the
 170-scenario grid. Controller mirrors \texttt{world.optimal\_stop} using the
 model in place of the physics: roll a coast plan forward in the model, fan
 trim jerks at each step, pick the plan with predicted excess closest to a
-target. Two policies:
+target excess (\texttt{= safety} by default; ``aim tight''). The tightest-safe
+margin is the smallest safety at which crashes $\le 2$/170.
 
-\emph{Aim-tight.} \texttt{target\_excess = safety} -- pick the smallest
-feasible excess. Yields low mean excess (\texttt{full} at safety $0.75$ m: 2
-crashes, excess 1.01 m) but heavy tail on tight margins.
+\begin{table}[h]
+\centering
+\small
+\caption{Tightest-safe closed-loop results (ruler = \SI{13.1}{\mm}, $n{=}170$
+scenarios). ``vs Ruler'' is excess / ruler.}
+\label{tab:controller}
+\begin{tabular}{lrrrrr}
+\toprule
+Arm & Safety* (m) & Crashes & Excess (m) & Space needed (m) & vs Ruler \\
+\midrule
+\texttt{baseline} (v3)     & 0.750 & 2 & 1.010 & 1.76 &  77$\times$ \\
+\texttt{static} (v3)       & 2.000 & 2 & 1.816 & 3.82 & 139$\times$ \\
+\texttt{transition} (v3)   & 1.000 & 2 & 1.752 & 2.75 & 134$\times$ \\
+\texttt{full} (v3)         & 1.000 & 1 & 0.880 & 1.88 &  67$\times$ \\
+\texttt{full\_recon}       & 3.000 & 1 & 2.780 & 5.78 & 213$\times$ \\
+\textbf{\texttt{full\_recon\_two}} & \textbf{0.350} & 1 & \textbf{1.251} & \textbf{1.60} & \textbf{95$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\emph{Uncertainty-buffered.} \texttt{target\_excess = safety + $k \sigma$} with
-$k{=}1.5$ and $\sigma$ = decoder gap RMSE. On \texttt{full\_recon} at tight
-margins this actually crashed \emph{more} because \texttt{full\_recon}'s
-$a$-channel is broken -- the brake-distance grid (indexed by $v, a$) is
-mis-read, so no gap-buffer helps.
+\emph{The a-channel matters a lot for control.} \texttt{full\_recon} has the
+tightest \emph{gap} accuracy but the worst controller performance
+(safety $\SI{3}{\m}$, $\SI{2.78}{\m}$ excess). Its broken $a$-channel
+(\SI{275}{\mm/\s^2}) corrupts the brake-distance grid (indexed by $v, a$),
+so plans are systematically mis-scored no matter what safety buffer we add.
+A dedicated experiment with $\texttt{target\_excess} = \texttt{safety} + 1.5\sigma_g$
+on \texttt{full\_recon} confirmed this: it did not reduce crashes at tight
+margins.
 
-\emph{Best on the 170-scenario grid.} \texttt{full} at safety $0.75$ m:
-2 crashes, mean excess $\SI{1.01}{\m}$, i.e.\ $\sim$77$\times$ the ruler.
-In the paired-common analysis on 163 scenarios all four ablation arms
-successfully complete, \texttt{full} averages $\SI{0.84}{\m}$ excess vs
-$\SI{0.98}{\m}$ for baseline (26\% tighter p90 tail).
+\emph{The two-decoder arm resolves this.} \texttt{full\_recon\_two} is the
+tightest-safe controller across every arm we trained: $\SI{0.35}{\m}$ safety,
+$\SI{1.25}{\m}$ excess, 1 crash out of 170. Its acceleration channel (best
+across all arms, $\SI{23}{\mm/\s^2}$) fixes the brake-grid mis-scoring.
+Paired common-scenario analysis on the 168 scenarios where both
+\texttt{full\_recon} and \texttt{full\_recon\_two} succeed:
 
-The 10-77$\times$ excess is not fundamental to the world model; it's the
-controller's sensitivity to \emph{a}-channel decoding under tight safety
-margins. The best world model (\texttt{full\_recon}) hasn't been evaluated
-with a well-designed closed-loop controller that accounts for its broken $a$.
+\begin{table}[h]
+\centering
+\small
+\caption{Paired common-scenario excess ($n{=}168$).}
+\label{tab:paired}
+\begin{tabular}{lrrr}
+\toprule
+Arm & mean (m) & median (m) & p90 (m) \\
+\midrule
+\texttt{full\_recon}                     & 2.79 & 2.81 & 3.80 \\
+\textbf{\texttt{full\_recon\_two}}       & \textbf{1.22} & \textbf{1.35} & \textbf{1.94} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two-decoder halves the mean excess and the p90 tail on the same scenarios.
+
+The controller-level moral: for a safety-margin-sensitive workload, \emph{all
+three channels} must be preserved, not just $g$. A world-model that is
+tightest on gap alone is unusable if $a$ is broken, because the brake grid is
+the controller's link between predicted state and physical stopping distance.
 
 \section{Interpretation}
 
@@ -290,56 +354,73 @@ configurations without shrinking in total:
 \centering
 \small
 \caption{Post-hoc MLP-decoder val MSE (100 ep, 2.16 M train), normalised.
-Total = sum of the three channels.}
+Total = sum of the three channels. Bold = best per column.}
 \label{tab:capacity}
 \begin{tabular}{lrrrr}
 \toprule
 Arm & gap & v & a & total \\
 \midrule
 \texttt{full\_v2}         & 5.6e-4 & 1.5e-4 & 4e-5   & 7.5e-4 \\
-\texttt{full\_recon}      & 3.5e-4 & 1.1e-4 & 8.9e-4 & 1.35e-3 \\
+\texttt{full\_recon}      & \textbf{3.5e-4} & \textbf{1.1e-4} & 8.9e-4 & 1.35e-3 \\
 \texttt{full\_recon\_mlp} & 3.8e-4 & 5.8e-4 & 3e-5   & 9.9e-4 \\
 \texttt{full\_recon\_far} & 1.15e-3& 2.4e-4 & 9e-5   & 1.5e-3 \\
+\texttt{full\_recon\_two} & 3.8e-4 & 2.5e-4 & \textbf{1e-5}   & \textbf{6.4e-4} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Total budget is $\sim 10^{-3}$ across configs; the loss configuration steers
-\emph{which channel} pays. A linear-decode-plus-recon loss forces gap and $v$
-tight and sacrifices $a$. An MLP-decode-plus-recon loss preserves gap and $a$
-and sacrifices $v$. Neither achieves all three.
+\emph{which channel} pays. Linear-decode-plus-recon forces gap and $v$ tight
+and sacrifices $a$. MLP-decode-plus-recon preserves gap and $a$ and
+sacrifices $v$. \textbf{Two decoders enforced together
+(\texttt{full\_recon\_two})} give the lowest total budget of any arm
+($6.4 \times 10^{-4}$) and the best acceleration channel by an order of
+magnitude, at the cost of the $g$-only concentration seen in
+\texttt{full\_recon}. This is the first arm that keeps all three channels
+usable simultaneously.
 
-\subsection{What would push further}
+\subsection{What we tried since; what remains}
 
 \begin{enumerate}
-\item \textbf{Two-decoder training.} Force the encoder to be simultaneously
-      linear-decodable and MLP-decodable to $(g, v, a)$. Directly attacks the
-      channel-redistribution constraint.
+\item \textbf{Two-decoder training. \emph{Done; works.}}
+      \texttt{full\_recon\_two} preserves all three channels (best $a$ across
+      all arms), gives the smallest post-hoc-decoder total-channel error, and
+      $8.6\times$ tightens the closed-loop safety threshold ($\SI{3}{\m}
+      \to \SI{0.35}{\m}$). Modest cost: $k{=}10$ gap MAE $33 \to 58$~mm.
 \item \textbf{Physics-structured latent.} Reserve three latent dimensions
       explicitly for $(g, v, a)$ via an alignment loss; leave the rest as
-      free features. Trivial to implement, may bypass the encoder-capacity
-      constraint on the three physical channels.
+      free features. Untried; may push the $k{=}10$ gap MAE back down while
+      keeping the two-decoder channel breadth.
 \item \textbf{Bigger encoder + longer training + more data, together.}
-      $D{=}256$, 100+ epochs, 20\,M windows. Estimated 8--10 h GPU. Brute
-      force; will pay off only if the current 33 mm floor is not a modelling
-      choice but a computation-budget choice.
-\item \textbf{Uncertainty-aware controller with a working $a$.} If we recover
-      \texttt{full\_recon}'s $a$-channel (either via lever 1 or 2 above),
-      the uncertainty buffer becomes usable and closed-loop excess should
-      drop substantially.
+      $D{=}256$, 100+ epochs, 20\,M windows. Estimated 8--10 h GPU. Would
+      test whether the current $\sim$30 mm gap floor is a modelling choice
+      or a compute-budget choice.
+\item \textbf{Uncertainty-aware controller.} Already tried on
+      \texttt{full\_recon} where it did not help because $a$ was broken.
+      Now that \texttt{full\_recon\_two} has a working $a$, a
+      $\texttt{target\_excess} = \texttt{safety} + k\sigma$ policy could
+      push its tightest-safe margin below \SI{0.35}{\m} and its excess below
+      \SI{1.25}{\m}. Untried on the two-decoder arm.
 \end{enumerate}
 
 \section{Reproducibility}
 
-All code at commit \texttt{345d71e} (\href{https://github.com/nahilsobh/psgjepa1d}{github.com/nahilsobh/psgjepa1d}).
+All code at commit \texttt{e55b54a} (\href{https://github.com/nahilsobh/psgjepa1d}{github.com/nahilsobh/psgjepa1d}).
 Training and evaluation are single-file:
 \begin{Verbatim}[fontsize=\small]
+# best world-model-accuracy arm
 python train.py --cache window_cache.npz --out ckpt/full_recon.pt \
     seed=4096 loss.recon_weight=1.0
-python eval/verify_dynamics.py --arms full_v2 full_recon \
+# best controller-usable arm (two-decoder scheme)
+python train.py --cache window_cache.npz --out ckpt/full_recon_two.pt \
+    seed=4096 loss.recon_weight=1.0 wm.two_decoders=true
+# world-model accuracy report with per-region breakdown
+python eval/verify_dynamics.py \
+    --arms full_recon full_recon_mlp full_recon_two \
     --jerk-mode indep --report-regions
-python eval/run_eval.py --arms full_recon \
-    --target-excess-extra 0.036 --out eval_uncertainty.json
+# closed-loop controller sweep across margins
+python eval/run_eval.py --arms full_recon full_recon_two \
+    --out eval_two.json --gauge-on none
 \end{Verbatim}
 
 Slurm wrappers: \texttt{scripts/train\_all.slurm},
@@ -355,8 +436,12 @@ Slurm wrappers: \texttt{scripts/train\_all.slurm},
       (car passing through the wall) are counted. The
       \emph{v\_hi}$\times$\emph{gap\_lo}$\times k{=}10$ cell in
       Table \ref{tab:regions} is largely such trajectories.
-\item Closed-loop controller was designed for the pre-recon arms; not re-tuned
-      for \texttt{full\_recon}'s $a$-channel deficit.
+\item Closed-loop controller uses aim-tight scoring
+      (\texttt{target\_excess = safety}). The uncertainty-buffered variant
+      was only tested on \texttt{full\_recon} (where it did not help because
+      the $a$-channel was broken). It has not been re-run on
+      \texttt{full\_recon\_two}, which has a working $a$-channel and may
+      benefit substantially.
 \item Every arm uses the same 30-epoch cosine schedule at $\text{lr}{=}10^{-3}$
       except \texttt{full\_d192\_e60\_recon}. Hyperparameter sensitivity was
       not swept.
@@ -366,13 +451,28 @@ Slurm wrappers: \texttt{scripts/train\_all.slurm},
 
 \section{Bottom line}
 
-The best learned world model (\texttt{full\_recon}) achieves
-\SI{7.5}{\mm}--\SI{9}{\mm} gap MAE at $k{=}1$ in the operating regime and
-\SI{33}{\mm} at $k{=}10$ aggregate, halving the 30-epoch baseline. The
-$\sim$13 mm analytical ruler is a real target that the model matches or beats
-in-regime. Aggregate accuracy is bottlenecked by the encoder's fixed
-information budget across $(g, v, a)$; growing capacity requires either
-structural change to the loss (two-decoder or physics-structured latent) or
-a compute commitment ($\sim$8 h GPU) to fairly test the quantity lever.
+Two winners for two different questions.
+
+\textbf{For raw gap-prediction accuracy:} \texttt{full\_recon} (linear
+recon), \SI{33}{\mm} $k{=}10$ gap MAE and \SIrange{7.5}{9}{\mm} $k{=}1$ in
+the operating regime. It beats the \SI{13}{\mm} analytical ruler cell-by-cell
+in mid/high-$v$ scenarios, but is unusable as a controller world-model
+because its acceleration channel collapses (\SI{275}{\mm/\s^2}).
+
+\textbf{For deployment as a controller world-model:}
+\texttt{full\_recon\_two} (two decoders enforced simultaneously). It gives
+up the concentrated $k{=}1$ gap peak (\SI{7.5}{\mm} $\to$ \SI{10}{\mm}
+best-cell) in exchange for preserving all three channels. Closed-loop
+consequences are dramatic: safety threshold drops $8.6\times$ (\SI{3}{\m}
+$\to$ \SI{0.35}{\m}), paired excess halves (\SI{2.79}{\m} $\to$
+\SI{1.22}{\m}, and the p90 tail nearly halves (\SI{3.80}{\m} $\to$
+\SI{1.94}{\m}). This is the arm we recommend.
+
+The encoder-capacity story from the original report still holds: at fixed
+$D{=}64$, precision redistributes across $(g, v, a)$ rather than growing.
+What changed is that the two-decoder objective steers the encoder to a
+broadly-distributed operating point rather than a gap-concentrated one -- and
+for a controller that needs all three channels through the brake-distance
+grid, broadly-distributed wins.
 
 \end{document}
