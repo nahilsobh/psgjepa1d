@@ -13,8 +13,13 @@
   .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .panel { background: #141821; border: 1px solid var(--line); border-radius: 8px;
     padding: 14px 16px; margin-bottom: 14px; }
-  canvas { display: block; width: 100%; height: 100px; background: #0a0c10;
+  canvas { display: block; width: 100%; height: 80px; background: #0a0c10;
     border-radius: 4px; }
+  .track-label { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.5px; margin: 8px 0 3px; }
+  .track-label .tag { color: var(--fg); }
+  .track-label .arm { font-variant-numeric: tabular-nums; text-transform: none; }
   .row { display: flex; gap: 20px; align-items: center; margin: 8px 0; }
   .row label { flex: 0 0 90px; font-size: 13px; color: var(--muted); }
   .row input[type=range] { flex: 1; accent-color: var(--accent); }
@@ -51,8 +56,18 @@
   </div>
 
   <div class="panel">
-    <canvas id="cv" width="880" height="100"></canvas>
-    <div class="row">
+    <div class="track-label">
+      <span><span class="tag">Analytical</span> &mdash; exact <code>world.exact_step</code></span>
+      <span class="arm" id="excessAn">excess &mdash;</span>
+    </div>
+    <canvas id="cvAn" width="880" height="80"></canvas>
+    <div class="track-label">
+      <span><span class="tag">World model</span> &mdash; <code>full_recon_two</code> decoded</span>
+      <span class="arm" id="excessMd">excess &mdash;</span>
+    </div>
+    <canvas id="cvMd" width="880" height="80"></canvas>
+
+    <div class="row" style="margin-top: 14px">
       <label for="v0">v<sub>0</sub></label>
       <input id="v0" type="range" min="3" max="14" step="0.5" value="9">
       <span class="val" id="v0val"></span>
@@ -64,18 +79,20 @@
     </div>
     <div class="row" style="justify-content:flex-end; gap:8px">
       <button class="secondary" id="reset">Reset</button>
-      <button id="run">Run analytical stop</button>
+      <button id="run">Run</button>
     </div>
     <div class="metrics" style="margin-top: 10px">
-      <div class="metric"><div class="k">gap remaining</div><div class="v" id="mGap">–</div></div>
-      <div class="metric"><div class="k">velocity</div><div class="v" id="mV">–</div></div>
-      <div class="metric"><div class="k">acceleration</div><div class="v" id="mA">–</div></div>
-      <div class="metric"><div class="k">stopping excess</div><div class="v" id="mExcess">–</div></div>
+      <div class="metric"><div class="k">gap remaining (true)</div><div class="v" id="mGap">–</div></div>
+      <div class="metric"><div class="k">velocity (true)</div><div class="v" id="mV">–</div></div>
+      <div class="metric"><div class="k">acceleration (true)</div><div class="v" id="mA">–</div></div>
+      <div class="metric"><div class="k">model gap error</div><div class="v" id="mGapErr">–</div></div>
     </div>
     <div class="hint" id="hint">
-      Pick a starting velocity and wall distance, then hit Run. The controller
-      plays the discrete optimum: coast &rarr; one trim jerk &rarr; terminal
-      brake landing at v=0, a=0 exactly.
+      Pick a starting velocity and wall distance, then hit Run. Top track is the
+      exact analytical controller (coast &rarr; trim &rarr; terminal brake to
+      v=0, a=0). Bottom track is the same plan replayed through the learned
+      world model &mdash; the offset between the two cars is the model's
+      per-step decode error.
     </div>
   </div>
 
@@ -114,6 +131,7 @@
   </div>
 </main>
 
+<script src="demo_data.js"></script>
 <script>
 'use strict';
 
@@ -236,33 +254,40 @@ function optimal_stop_trace(v0, obs, NJ=81) {
 }
 
 // ---------- UI ----------
-const cv = document.getElementById('cv');
-const ctx = cv.getContext('2d');
+const cvAn = document.getElementById('cvAn');
+const cvMd = document.getElementById('cvMd');
+const ctxAn = cvAn.getContext('2d');
+const ctxMd = cvMd.getContext('2d');
 const $ = id => document.getElementById(id);
+
+let bakedData = null;  // populated by fetch below
 
 function fmt(x, unit, digits=3) {
   return `${x.toFixed(digits)} ${unit}`;
 }
 
-function updateReadout(gap, v, a, excess=null) {
+function fmtExcess(mm) {
+  const ruler = 13.13, ratio = mm / ruler;
+  const color = mm < 30 ? 'var(--good)' : mm < 100 ? 'var(--warn)' : 'var(--bad)';
+  return `<span style="color:${color}">${mm.toFixed(1)} mm</span>` +
+    ` <span style="color:var(--muted)">${ratio.toFixed(1)}× ruler</span>`;
+}
+
+function updateReadout(gap, v, a, xTrue, xModel) {
   $('mGap').textContent = fmt(gap, 'm');
   $('mV').textContent = fmt(v, 'm/s');
   $('mA').textContent = fmt(a, 'm/s²');
-  if (excess !== null) {
-    const mm = excess * 1000;
-    const ruler = 13.13;
-    const ratio = mm/ruler;
-    const color = mm < 30 ? 'var(--good)' : mm < 100 ? 'var(--warn)' : 'var(--bad)';
-    $('mExcess').innerHTML = `<span style="color:${color}">${mm.toFixed(1)} mm</span>` +
-      ` <span style="color:var(--muted); font-size:12px">${ratio.toFixed(1)}× ruler</span>`;
+  if (xTrue !== undefined && xModel !== undefined) {
+    const err_mm = Math.abs(xTrue - xModel) * 1000;
+    const color = err_mm < 20 ? 'var(--good)' : err_mm < 80 ? 'var(--warn)' : 'var(--bad)';
+    $('mGapErr').innerHTML = `<span style="color:${color}">${err_mm.toFixed(1)} mm</span>`;
   } else {
-    $('mExcess').textContent = '–';
+    $('mGapErr').textContent = '–';
   }
 }
 
-function drawScene(x, wall, v, phase='idle') {
-  const W = cv.width, H = cv.height;
-  const scale = (W - 60) / 24;  // 24 m wide viewport, with padding
+function drawScene(ctx, W, H, x, wall, v, phase='idle', ghostX=null) {
+  const scale = (W - 60) / 24;
   const y = H/2;
   ctx.fillStyle = '#0a0c10';
   ctx.fillRect(0, 0, W, H);
@@ -281,7 +306,15 @@ function drawScene(x, wall, v, phase='idle') {
     ctx.beginPath(); ctx.moveTo(px, y+18); ctx.lineTo(px, y+22); ctx.stroke();
     if (m % 4 === 0) ctx.fillText(`${m}m`, px-6, y+35);
   }
-  // car (arrow pointing right if v>0)
+  // ghost car (analytical position on the model track)
+  if (ghostX !== null) {
+    const gPx = 30 + ghostX*scale;
+    ctx.strokeStyle = 'rgba(74,158,255,0.35)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gPx-8, y-6); ctx.lineTo(gPx+8, y); ctx.lineTo(gPx-8, y+6);
+    ctx.closePath(); ctx.stroke();
+  }
+  // car
   const carPx = 30 + x*scale;
   ctx.fillStyle = phase === 'trim' ? '#ffb84a' : (phase === 'brake' ? '#ff5a5a' : '#4a9eff');
   ctx.beginPath();
@@ -307,16 +340,27 @@ function stopAnim() {
   if (animHandle) { cancelAnimationFrame(animHandle); animHandle = null; }
 }
 
+function bakedKey(v0, wall) { return `${v0.toFixed(1)}_${wall.toFixed(1)}`; }
+
 function init() {
   stopAnim();
   const v0 = parseFloat($('v0').value);
   const wall = parseFloat($('wall').value);
   $('v0val').textContent = fmt(v0, 'm/s', 1);
   $('wallval').textContent = fmt(wall, 'm', 1);
-  drawScene(0, wall, v0, 'idle');
+  drawScene(ctxAn, cvAn.width, cvAn.height, 0, wall, v0, 'idle');
+  drawScene(ctxMd, cvMd.width, cvMd.height, 0, wall, v0, 'idle');
   updateReadout(wall, v0, 0);
-  $('hint').textContent = 'Hit Run to execute the analytical optimum.';
-  $('run').disabled = false;
+  $('excessAn').textContent = 'excess —';
+  $('excessMd').textContent = 'excess —';
+  const modelAvailable = bakedData && bakedData.traj[bakedKey(v0, wall)];
+  const hint = bakedData
+    ? (modelAvailable
+        ? `Hit Run — model track uses baked <code>${bakedData.meta.arm}</code>.`
+        : `Analytical only (this v0/wall not in baked model grid — try slider values that snap to 0.5 m/s and 0.5 m).`)
+    : 'Loading model trajectories…';
+  $('hint').innerHTML = hint;
+  $('run').disabled = !bakedData;
 }
 
 function run() {
@@ -325,42 +369,74 @@ function run() {
   const wall = parseFloat($('wall').value);
   const {best, coast} = optimal_stop_trace(v0, wall);
   if (best === null) {
-    $('hint').textContent = 'No feasible plan (wall too close for this v₀ — try larger wall).';
+    $('hint').textContent = 'No feasible analytical plan (wall too close for v₀).';
     return;
   }
-  // Build the full step-by-step trajectory
-  const traj = [];
+  // Analytical trajectory: initial coast[0], then coast[1..k], trim, brake steps
+  const anTraj = [];
   for (let k = 0; k <= best.k; k++) {
     const c = coast[k];
-    traj.push({x: c.x, v: c.v, a: c.a, kind: k === best.k ? 'trim-boundary' : 'coast'});
+    anTraj.push({x: c.x, v: c.v, a: c.a, kind: k === best.k ? 'trim-boundary' : 'coast'});
   }
-  if (best.jTrim !== null) traj.push({...best.afterTrim, kind: 'trim'});
-  for (const s of best.brake.steps) traj.push({...s, kind: 'brake'});
-  const finalX = traj[traj.length - 1].x;
-  const excess = wall - finalX;
+  if (best.jTrim !== null) anTraj.push({...best.afterTrim, kind: 'trim'});
+  for (const s of best.brake.steps) anTraj.push({...s, kind: 'brake'});
+  const anFinalX = anTraj[anTraj.length - 1].x;
+  const anExcess = wall - anFinalX;
 
-  let idx = 0;
+  // Model trajectory (baked): entries per applied jerk. Prepend initial to align frame 0.
+  const bakeEntry = bakedData && bakedData.traj[bakedKey(v0, wall)];
+  const mdTraj = [{gap: wall, v: v0, a: 0, kind: 'coast'}];
+  let mdFinalX = anFinalX, mdExcess = anExcess;
+  if (bakeEntry) {
+    for (const [gap, v, a] of bakeEntry.model)
+      mdTraj.push({gap, v, a, kind: 'brake'});
+    mdFinalX = wall - mdTraj[mdTraj.length - 1].gap;
+    mdExcess = bakeEntry.excess;  // analytical excess (same plan)
+  }
+  // Align lengths (anTraj may have one extra "initial" entry compared to model rollout).
+  // We render frame i from anTraj[i] and mdTraj[i] (with clamping).
+  const N = Math.max(anTraj.length, mdTraj.length);
+
   const startT = performance.now();
-  const stepMs = 60;  // slow enough to see; each tick is 100ms of sim
+  const stepMs = 60;
   $('run').disabled = true;
   $('hint').innerHTML = `Plan: coast <b>${best.k}</b> ticks → ` +
     (best.jTrim === null ? 'no trim' : `trim jerk <b>${best.jTrim.toFixed(1)} m/s³</b>`) +
-    ` → brake (${best.brake.steps.length} ticks).`;
+    ` → brake (${best.brake.steps.length} ticks).` +
+    (bakeEntry ? '' : ' Model track shows initial state only (grid miss).');
 
   function frame() {
     const now = performance.now();
-    idx = Math.min(traj.length - 1, Math.floor((now - startT) / stepMs));
-    const s = traj[idx];
-    drawScene(s.x, wall, s.v, s.kind);
-    if (idx === traj.length - 1) {
-      updateReadout(wall - s.x, s.v, s.a, excess);
+    const i = Math.min(N - 1, Math.floor((now - startT) / stepMs));
+    const sAn = anTraj[Math.min(i, anTraj.length - 1)];
+    const sMd = mdTraj[Math.min(i, mdTraj.length - 1)];
+    const mdX = wall - sMd.gap;
+    drawScene(ctxAn, cvAn.width, cvAn.height, sAn.x, wall, sAn.v, sAn.kind);
+    drawScene(ctxMd, cvMd.width, cvMd.height, mdX, wall, sMd.v, sMd.kind, sAn.x);
+    updateReadout(wall - sAn.x, sAn.v, sAn.a, sAn.x, mdX);
+    if (i === N - 1) {
+      $('excessAn').innerHTML = 'analytical excess ' + fmtExcess(anExcess * 1000);
+      if (bakeEntry) {
+        const mdErr_mm = Math.abs(anFinalX - mdX) * 1000;
+        const color = mdErr_mm < 20 ? 'var(--good)' : mdErr_mm < 80 ? 'var(--warn)' : 'var(--bad)';
+        $('excessMd').innerHTML = `model gap error <span style="color:${color}">${mdErr_mm.toFixed(1)} mm</span>`;
+      } else {
+        $('excessMd').textContent = '— (not baked)';
+      }
       $('run').disabled = false;
     } else {
-      updateReadout(wall - s.x, s.v, s.a);
       animHandle = requestAnimationFrame(frame);
     }
   }
   frame();
+}
+
+// demo_data.js (loaded via <script> above) assigns window.bakedData
+if (typeof window.bakedData !== 'undefined') {
+  bakedData = window.bakedData;
+} else {
+  console.warn('demo_data.js not loaded; model track disabled');
+  bakedData = {meta: {arm: '?'}, traj: {}};
 }
 
 $('v0').addEventListener('input', init);
