@@ -8,7 +8,7 @@ from .grounding import PSGGroundingHeads, grounding_loss
 
 
 class JEPA1D(nn.Module):
-    """encoder 3->H->H->D ; residual action-conditioned predictor ; post-hoc decoder slot."""
+    """encoder 3->H->H->D ; residual action-conditioned predictor ; linear decoder D->3."""
     def __init__(self, embed_dim=64, hidden=512, state_dim=3):
         super().__init__()
         self.embed_dim = embed_dim
@@ -18,10 +18,12 @@ class JEPA1D(nn.Module):
         self.p1 = nn.Linear(embed_dim+1, hidden); self.p2 = nn.Linear(hidden,hidden)
         self.p3 = nn.Linear(hidden, embed_dim)
         nn.init.normal_(self.p3.weight, 0, 0.02); nn.init.zeros_(self.p3.bias)
+        self.decoder = nn.Linear(embed_dim, state_dim)   # optional recon loss (see training_step)
     def encode(self, s): return self.encoder(s)
     def predict(self, z, u):
         h = F.gelu(self.p1(torch.cat([z,u],-1))); h = F.gelu(self.p2(h))
         return z + self.p3(h)
+    def decode(self, z): return self.decoder(z)
 
 
 # ---------- anti-collapse regularisers (LeWM keeps SIGReg; others for the ablation) ----------
@@ -74,6 +76,16 @@ def training_step(model, heads, batch, cfg):
     reg_fn = REG[cfg['reg_type']]
     out['reg_loss'] = reg_fn(emb.reshape(B*T,-1))
     loss = out['pred_loss'] + cfg['reg_weight']*out['reg_loss']
+    rw = cfg.get('recon_weight', 0.0)
+    if rw > 0.0:
+        diff2 = (model.decode(emb) - S).pow(2)                          # (B,T,state_dim)
+        cw = cfg.get('recon_channel_weights', None)
+        if cw is not None:
+            w = torch.tensor(cw, device=diff2.device, dtype=diff2.dtype)
+            out['recon_loss'] = (diff2 * w).mean()
+        else:
+            out['recon_loss'] = diff2.mean()
+        loss = loss + rw * out['recon_loss']
     gw = cfg.get('grounding_weight', 0.0)
     if heads is not None and gw > 0.0:
         gl = grounding_loss(heads, emb, S,

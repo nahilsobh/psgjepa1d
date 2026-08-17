@@ -38,13 +38,15 @@ def build(cfg, dev, cache='window_cache.npz'):
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('overrides', nargs='*')
-    ap.add_argument('--out', default='psgjepa1d_run.json'); A = ap.parse_args()
+    ap.add_argument('--out', default='psgjepa1d.pt')
+    ap.add_argument('--cache', default='window_cache.npz')
+    A = ap.parse_args()
     cfg = load_cfg(A.overrides)
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
     torch.manual_seed(cfg['seed']); np.random.seed(cfg['seed'])
     print(f"device={dev}  reg={cfg['loss']['reg_type']}  lambda_g={cfg['loss']['grounding']['weight']}"
           f"  use_velocity={cfg['loss']['grounding']['use_velocity']}")
-    D = build(cfg, dev)
+    D = build(cfg, dev, A.cache)
     m = JEPA1D(cfg['wm']['embed_dim'], cfg['wm']['hidden']).to(dev)
     g = cfg['loss']['grounding']
     heads = (PSGGroundingHeads(cfg['wm']['embed_dim'], len(g['state_idx']), len(g['joint_idx']),
@@ -61,7 +63,9 @@ def main():
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, E)
     lc = dict(reg_type=cfg['loss']['reg_type'], reg_weight=cfg['loss']['reg_weight'],
               grounding_weight=g['weight'], state_idx=g['state_idx'],
-              joint_idx=g['joint_idx'], vel_idx=g['vel_idx'])
+              joint_idx=g['joint_idx'], vel_idx=g['vel_idx'],
+              recon_weight=cfg['loss'].get('recon_weight', 0.0),
+              recon_channel_weights=cfg['loss'].get('recon_channel_weights', None))
     N = len(D['states'])
     for ep in range(E):
         perm = torch.randperm(N, device=dev); tot=0.; nb=0
@@ -73,8 +77,9 @@ def main():
             tot += float(out['loss']); nb += 1
         sch.step()
         if (ep+1) % 5 == 0 or ep == 0: print(f"  ep {ep+1:>3}/{E}  loss {tot/nb:.5f}", flush=True)
+    os.makedirs(os.path.dirname(A.out) or '.', exist_ok=True)
     torch.save(dict(model=m.state_dict(), cfg=cfg,
-                    norm=dict(sm=D['sm'],ss=D['ss'],um=D['um'],us=D['us'])), 'psgjepa1d.pt')
-    print("saved psgjepa1d.pt  (grounding heads intentionally discarded)")
+                    norm=dict(sm=D['sm'],ss=D['ss'],um=D['um'],us=D['us'])), A.out)
+    print(f"saved {A.out}  (grounding heads intentionally discarded)")
 
 if __name__ == '__main__': main()

@@ -273,7 +273,7 @@ def load_checkpoint(path, dev):
     ck = torch.load(path, map_location=dev, weights_only=False)
     cfg = ck['cfg']; norm = ck['norm']
     m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden'])).to(dev)
-    m.load_state_dict(ck['model']); m.eval()
+    m.load_state_dict(ck['model'], strict=False); m.eval()  # decoder is optional
     return m, cfg, norm
 
 
