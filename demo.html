@@ -278,7 +278,7 @@ const ctxErr = cvErr.getContext('2d');
 const $ = id => document.getElementById(id);
 
 const K_VERIFIED = 10;      // horizon we validated in verify_dynamics
-let bakedData = null;       // populated by <script src="demo_data.js"></script>
+let bakedData = null;       // populated by demo_data.js loaded via a script tag above
 
 function fmt(x, unit, digits=3) {
   return `${x.toFixed(digits)} ${unit}`;
