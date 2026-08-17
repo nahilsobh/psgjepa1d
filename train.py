@@ -49,7 +49,8 @@ def main():
           f"  use_velocity={cfg['loss']['grounding']['use_velocity']}")
     D = build(cfg, dev, A.cache)
     m = JEPA1D(cfg['wm']['embed_dim'], cfg['wm']['hidden'],
-               decoder_hidden=cfg['wm'].get('decoder_hidden', None)).to(dev)
+               decoder_hidden=cfg['wm'].get('decoder_hidden', None),
+               two_decoders=cfg['wm'].get('two_decoders', False)).to(dev)
     g = cfg['loss']['grounding']
     heads = (PSGGroundingHeads(cfg['wm']['embed_dim'], len(g['state_idx']), len(g['joint_idx']),
                                max(len(g['vel_idx']),1), g['use_velocity'], g['hidden_dim'],

@@ -9,8 +9,12 @@ from .grounding import PSGGroundingHeads, grounding_loss
 
 class JEPA1D(nn.Module):
     """encoder 3->H->H->D ; residual action-conditioned predictor ; decoder D->state.
-    decoder_hidden=None: linear decoder (default). int: MLP decoder D->h->state."""
-    def __init__(self, embed_dim=64, hidden=512, state_dim=3, decoder_hidden=None):
+    decoder_hidden=None: linear primary decoder. int: MLP primary decoder D->h->state.
+    two_decoders=True: also add a secondary decoder (of the opposite kind);
+      recon loss then averages MSE across both. Forces encoder to be
+      simultaneously linear-decodable AND MLP-decodable to (g, v, a)."""
+    def __init__(self, embed_dim=64, hidden=512, state_dim=3,
+                 decoder_hidden=None, two_decoders=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.encoder = nn.Sequential(nn.Linear(state_dim,hidden), nn.GELU(),
@@ -24,6 +28,15 @@ class JEPA1D(nn.Module):
         else:
             self.decoder = nn.Sequential(nn.Linear(embed_dim, decoder_hidden), nn.GELU(),
                                          nn.Linear(decoder_hidden, state_dim))
+        if two_decoders:
+            # Secondary is the opposite kind of the primary.
+            if decoder_hidden is None:
+                self.decoder2 = nn.Sequential(nn.Linear(embed_dim, 128), nn.GELU(),
+                                              nn.Linear(128, state_dim))
+            else:
+                self.decoder2 = nn.Linear(embed_dim, state_dim)
+        else:
+            self.decoder2 = None
     def encode(self, s): return self.encoder(s)
     def predict(self, z, u):
         h = F.gelu(self.p1(torch.cat([z,u],-1))); h = F.gelu(self.p2(h))
@@ -83,13 +96,22 @@ def training_step(model, heads, batch, cfg):
     loss = out['pred_loss'] + cfg['reg_weight']*out['reg_loss']
     rw = cfg.get('recon_weight', 0.0)
     if rw > 0.0:
-        diff2 = (model.decode(emb) - S).pow(2)                          # (B,T,state_dim)
+        diff2 = (model.decode(emb) - S).pow(2)                          # primary decoder
         cw = cfg.get('recon_channel_weights', None)
         if cw is not None:
             w = torch.tensor(cw, device=diff2.device, dtype=diff2.dtype)
-            out['recon_loss'] = (diff2 * w).mean()
+            l_primary = (diff2 * w).mean()
         else:
-            out['recon_loss'] = diff2.mean()
+            l_primary = diff2.mean()
+        if getattr(model, 'decoder2', None) is not None:
+            diff2b = (model.decoder2(emb) - S).pow(2)                   # secondary decoder
+            if cw is not None:
+                l_secondary = (diff2b * w).mean()
+            else:
+                l_secondary = diff2b.mean()
+            out['recon_loss'] = 0.5 * (l_primary + l_secondary)
+        else:
+            out['recon_loss'] = l_primary
         loss = loss + rw * out['recon_loss']
     gw = cfg.get('grounding_weight', 0.0)
     if heads is not None and gw > 0.0:
