@@ -62,10 +62,25 @@
     </div>
     <canvas id="cvAn" width="880" height="80"></canvas>
     <div class="track-label">
-      <span><span class="tag">World model</span> &mdash; <code>full_recon_two</code> decoded</span>
+      <span><span class="tag">World model</span> &mdash;
+        <select id="arm" style="background:#0a0c10; color:var(--fg); border:1px solid var(--line);
+          border-radius:3px; padding:2px 6px; font-size:12px;">
+          <option value="full_recon" selected>full_recon (best k=10 gap)</option>
+          <option value="full_recon_two">full_recon_two (best controller)</option>
+          <option value="full">full (grounding only)</option>
+          <option value="baseline">baseline (no grounding)</option>
+        </select>
+        decoded
+      </span>
       <span class="arm" id="excessMd">excess &mdash;</span>
     </div>
     <canvas id="cvMd" width="880" height="80"></canvas>
+
+    <div class="track-label" style="margin-top:8px">
+      <span><span class="tag">Model gap error over time</span> &mdash; |true − model| gap</span>
+      <span class="arm" id="driftMax">peak &mdash;</span>
+    </div>
+    <canvas id="cvErr" width="880" height="80"></canvas>
 
     <div class="row" style="margin-top: 14px">
       <label for="v0">v<sub>0</sub></label>
@@ -256,11 +271,14 @@ function optimal_stop_trace(v0, obs, NJ=81) {
 // ---------- UI ----------
 const cvAn = document.getElementById('cvAn');
 const cvMd = document.getElementById('cvMd');
+const cvErr = document.getElementById('cvErr');
 const ctxAn = cvAn.getContext('2d');
 const ctxMd = cvMd.getContext('2d');
+const ctxErr = cvErr.getContext('2d');
 const $ = id => document.getElementById(id);
 
-let bakedData = null;  // populated by fetch below
+const K_VERIFIED = 10;      // horizon we validated in verify_dynamics
+let bakedData = null;       // populated by <script src="demo_data.js"></script>
 
 function fmt(x, unit, digits=3) {
   return `${x.toFixed(digits)} ${unit}`;
@@ -286,7 +304,7 @@ function updateReadout(gap, v, a, xTrue, xModel) {
   }
 }
 
-function drawScene(ctx, W, H, x, wall, v, phase='idle', ghostX=null) {
+function drawScene(ctx, W, H, x, wall, v, phase='idle', ghostX=null, extrapolate=false) {
   const scale = (W - 60) / 24;
   const y = H/2;
   ctx.fillStyle = '#0a0c10';
@@ -314,12 +332,21 @@ function drawScene(ctx, W, H, x, wall, v, phase='idle', ghostX=null) {
     ctx.moveTo(gPx-8, y-6); ctx.lineTo(gPx+8, y); ctx.lineTo(gPx-8, y+6);
     ctx.closePath(); ctx.stroke();
   }
-  // car
+  // car (dimmed if past the verified horizon k=10)
   const carPx = 30 + x*scale;
-  ctx.fillStyle = phase === 'trim' ? '#ffb84a' : (phase === 'brake' ? '#ff5a5a' : '#4a9eff');
+  const baseColor = phase === 'trim' ? '#ffb84a' : (phase === 'brake' ? '#ff5a5a' : '#4a9eff');
+  ctx.fillStyle = extrapolate ? baseColor + '80' : baseColor;   // 50% alpha in hex
   ctx.beginPath();
   ctx.moveTo(carPx-8, y-6); ctx.lineTo(carPx+8, y); ctx.lineTo(carPx-8, y+6);
   ctx.closePath(); ctx.fill();
+  if (extrapolate) {
+    ctx.strokeStyle = '#ffb84a'; ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(carPx-8, y-6); ctx.lineTo(carPx+8, y); ctx.lineTo(carPx-8, y+6);
+    ctx.closePath(); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   // velocity arrow above car
   if (Math.abs(v) > 0.1) {
     const arrowLen = Math.min(50, Math.abs(v)*5);
@@ -334,6 +361,49 @@ function drawScene(ctx, W, H, x, wall, v, phase='idle', ghostX=null) {
   }
 }
 
+function drawErrPlot(errors) {
+  const W = cvErr.width, H = cvErr.height;
+  const padL = 40, padR = 20, padT = 8, padB = 20;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  ctxErr.fillStyle = '#0a0c10'; ctxErr.fillRect(0, 0, W, H);
+  if (errors.length < 2) return;
+  const maxErrMm = Math.max(...errors, 100);       // at least 100 mm scale
+  const N = errors.length;
+  // grid: horizontal lines at 100/500/1000 mm (whichever fit)
+  ctxErr.font = '10px sans-serif';
+  ctxErr.strokeStyle = '#1a1e24'; ctxErr.fillStyle = '#666';
+  const gridLevels = [50, 100, 500, 1000, 2000, 5000].filter(v => v <= maxErrMm * 1.05);
+  for (const v of gridLevels) {
+    const y = padT + plotH - (v / maxErrMm) * plotH;
+    ctxErr.beginPath(); ctxErr.moveTo(padL, y); ctxErr.lineTo(W - padR, y); ctxErr.stroke();
+    ctxErr.fillText(`${v} mm`, 4, y + 3);
+  }
+  // baseline
+  ctxErr.strokeStyle = '#2a2f35';
+  ctxErr.beginPath(); ctxErr.moveTo(padL, padT + plotH); ctxErr.lineTo(W - padR, padT + plotH); ctxErr.stroke();
+  // k=10 marker (vertical dashed)
+  if (N > K_VERIFIED) {
+    const xK = padL + (K_VERIFIED / (N - 1)) * plotW;
+    ctxErr.strokeStyle = '#ffb84a'; ctxErr.setLineDash([3, 3]);
+    ctxErr.beginPath(); ctxErr.moveTo(xK, padT); ctxErr.lineTo(xK, padT + plotH); ctxErr.stroke();
+    ctxErr.setLineDash([]);
+    ctxErr.fillStyle = '#ffb84a'; ctxErr.fillText('k=10 verified', xK + 3, padT + 10);
+  }
+  // curve
+  ctxErr.strokeStyle = '#ff5a5a'; ctxErr.lineWidth = 1.5;
+  ctxErr.beginPath();
+  for (let i = 0; i < N; i++) {
+    const x = padL + (i / Math.max(1, N - 1)) * plotW;
+    const y = padT + plotH - (errors[i] / maxErrMm) * plotH;
+    if (i === 0) ctxErr.moveTo(x, y); else ctxErr.lineTo(x, y);
+  }
+  ctxErr.stroke();
+  // x labels
+  ctxErr.fillStyle = '#666';
+  ctxErr.fillText('tick 0', padL, H - 4);
+  ctxErr.fillText(`tick ${N - 1}`, W - padR - 35, H - 4);
+}
+
 let animHandle = null;
 
 function stopAnim() {
@@ -341,38 +411,13 @@ function stopAnim() {
 }
 
 function bakedKey(v0, wall) { return `${v0.toFixed(1)}_${wall.toFixed(1)}`; }
+function currentArm() { return $('arm').value; }
 
-function init() {
-  stopAnim();
-  const v0 = parseFloat($('v0').value);
-  const wall = parseFloat($('wall').value);
-  $('v0val').textContent = fmt(v0, 'm/s', 1);
-  $('wallval').textContent = fmt(wall, 'm', 1);
-  drawScene(ctxAn, cvAn.width, cvAn.height, 0, wall, v0, 'idle');
-  drawScene(ctxMd, cvMd.width, cvMd.height, 0, wall, v0, 'idle');
-  updateReadout(wall, v0, 0);
-  $('excessAn').textContent = 'excess —';
-  $('excessMd').textContent = 'excess —';
-  const modelAvailable = bakedData && bakedData.traj[bakedKey(v0, wall)];
-  const hint = bakedData
-    ? (modelAvailable
-        ? `Hit Run — model track uses baked <code>${bakedData.meta.arm}</code>.`
-        : `Analytical only (this v0/wall not in baked model grid — try slider values that snap to 0.5 m/s and 0.5 m).`)
-    : 'Loading model trajectories…';
-  $('hint').innerHTML = hint;
-  $('run').disabled = !bakedData;
-}
-
-function run() {
-  stopAnim();
-  const v0 = parseFloat($('v0').value);
-  const wall = parseFloat($('wall').value);
+function buildTraj(v0, wall) {
+  // Returns {anTraj, mdTraj, errors, anExcess, mdError_final, jTrim, k, nBrake} or null.
   const {best, coast} = optimal_stop_trace(v0, wall);
-  if (best === null) {
-    $('hint').textContent = 'No feasible analytical plan (wall too close for v₀).';
-    return;
-  }
-  // Analytical trajectory: initial coast[0], then coast[1..k], trim, brake steps
+  if (best === null) return null;
+  // Analytical trajectory (state per tick incl. initial)
   const anTraj = [];
   for (let k = 0; k <= best.k; k++) {
     const c = coast[k];
@@ -383,27 +428,75 @@ function run() {
   const anFinalX = anTraj[anTraj.length - 1].x;
   const anExcess = wall - anFinalX;
 
-  // Model trajectory (baked): entries per applied jerk. Prepend initial to align frame 0.
-  const bakeEntry = bakedData && bakedData.traj[bakedKey(v0, wall)];
+  // Model trajectory from baked data (prepend initial to align frame 0)
+  const armName = currentArm();
+  const arm = bakedData && bakedData.arms && bakedData.arms[armName];
+  const bakeEntry = arm && arm[bakedKey(v0, wall)];
   const mdTraj = [{gap: wall, v: v0, a: 0, kind: 'coast'}];
-  let mdFinalX = anFinalX, mdExcess = anExcess;
   if (bakeEntry) {
     for (const [gap, v, a] of bakeEntry.model)
       mdTraj.push({gap, v, a, kind: 'brake'});
-    mdFinalX = wall - mdTraj[mdTraj.length - 1].gap;
-    mdExcess = bakeEntry.excess;  // analytical excess (same plan)
   }
-  // Align lengths (anTraj may have one extra "initial" entry compared to model rollout).
-  // We render frame i from anTraj[i] and mdTraj[i] (with clamping).
+  // Per-tick |true_x - model_x| in mm (over the aligned length)
   const N = Math.max(anTraj.length, mdTraj.length);
+  const errors = [];
+  for (let i = 0; i < N; i++) {
+    const sAn = anTraj[Math.min(i, anTraj.length - 1)];
+    const sMd = mdTraj[Math.min(i, mdTraj.length - 1)];
+    errors.push(Math.abs(sAn.x - (wall - sMd.gap)) * 1000);
+  }
+  const mdError_final = errors[errors.length - 1];
+  return {
+    anTraj, mdTraj, errors, anExcess, mdError_final, hasModel: !!bakeEntry,
+    k: best.k, jTrim: best.jTrim, nBrake: best.brake.steps.length, wall,
+  };
+}
+
+function init() {
+  stopAnim();
+  const v0 = parseFloat($('v0').value);
+  const wall = parseFloat($('wall').value);
+  $('v0val').textContent = fmt(v0, 'm/s', 1);
+  $('wallval').textContent = fmt(wall, 'm', 1);
+  drawScene(ctxAn, cvAn.width, cvAn.height, 0, wall, v0, 'idle');
+  drawScene(ctxMd, cvMd.width, cvMd.height, 0, wall, v0, 'idle');
+  drawErrPlot([]);
+  updateReadout(wall, v0, 0);
+  $('excessAn').textContent = 'excess —';
+  $('excessMd').textContent = 'excess —';
+  $('driftMax').textContent = 'peak —';
+  const armName = currentArm();
+  const arm = bakedData && bakedData.arms && bakedData.arms[armName];
+  const modelAvailable = arm && arm[bakedKey(v0, wall)];
+  const hint = bakedData && bakedData.arms
+    ? (modelAvailable
+        ? `Hit Run — model = <code>${armName}</code>. Verified horizon = k=${K_VERIFIED} ticks; beyond that the model extrapolates (dashed car outline).`
+        : `Analytical only (this v0/wall not in baked grid for ${armName} — try slider values that snap to 0.5 m/s and 0.5 m).`)
+    : 'Loading model trajectories…';
+  $('hint').innerHTML = hint;
+  $('run').disabled = !bakedData;
+}
+
+function run() {
+  stopAnim();
+  const v0 = parseFloat($('v0').value);
+  const wall = parseFloat($('wall').value);
+  const T = buildTraj(v0, wall);
+  if (T === null) {
+    $('hint').textContent = 'No feasible analytical plan (wall too close for v₀).';
+    return;
+  }
+  const {anTraj, mdTraj, errors, anExcess, mdError_final, hasModel} = T;
+  const N = Math.max(anTraj.length, mdTraj.length);
+  drawErrPlot(errors);
 
   const startT = performance.now();
   const stepMs = 60;
   $('run').disabled = true;
-  $('hint').innerHTML = `Plan: coast <b>${best.k}</b> ticks → ` +
-    (best.jTrim === null ? 'no trim' : `trim jerk <b>${best.jTrim.toFixed(1)} m/s³</b>`) +
-    ` → brake (${best.brake.steps.length} ticks).` +
-    (bakeEntry ? '' : ' Model track shows initial state only (grid miss).');
+  $('hint').innerHTML = `Plan: coast <b>${T.k}</b> ticks → ` +
+    (T.jTrim === null ? 'no trim' : `trim jerk <b>${T.jTrim.toFixed(1)} m/s³</b>`) +
+    ` → brake (${T.nBrake} ticks).` +
+    (hasModel ? '' : ' Model track shows initial state only (grid miss).');
 
   function frame() {
     const now = performance.now();
@@ -411,17 +504,21 @@ function run() {
     const sAn = anTraj[Math.min(i, anTraj.length - 1)];
     const sMd = mdTraj[Math.min(i, mdTraj.length - 1)];
     const mdX = wall - sMd.gap;
+    const extrapolate = i > K_VERIFIED;
     drawScene(ctxAn, cvAn.width, cvAn.height, sAn.x, wall, sAn.v, sAn.kind);
-    drawScene(ctxMd, cvMd.width, cvMd.height, mdX, wall, sMd.v, sMd.kind, sAn.x);
+    drawScene(ctxMd, cvMd.width, cvMd.height, mdX, wall, sMd.v, sMd.kind, sAn.x, extrapolate);
     updateReadout(wall - sAn.x, sAn.v, sAn.a, sAn.x, mdX);
     if (i === N - 1) {
       $('excessAn').innerHTML = 'analytical excess ' + fmtExcess(anExcess * 1000);
-      if (bakeEntry) {
-        const mdErr_mm = Math.abs(anFinalX - mdX) * 1000;
-        const color = mdErr_mm < 20 ? 'var(--good)' : mdErr_mm < 80 ? 'var(--warn)' : 'var(--bad)';
-        $('excessMd').innerHTML = `model gap error <span style="color:${color}">${mdErr_mm.toFixed(1)} mm</span>`;
+      if (hasModel) {
+        const c = mdError_final < 20 ? 'var(--good)' : mdError_final < 80 ? 'var(--warn)' : 'var(--bad)';
+        $('excessMd').innerHTML = `model gap error <span style="color:${c}">${mdError_final.toFixed(1)} mm</span>`;
+        const peak = Math.max(...errors);
+        $('driftMax').innerHTML = `peak <span style="color:${peak < 100 ? 'var(--warn)' : 'var(--bad)'}">${peak.toFixed(1)} mm</span>` +
+          ` &middot; k=${K_VERIFIED}: ${errors[Math.min(K_VERIFIED, errors.length-1)].toFixed(1)} mm`;
       } else {
         $('excessMd').textContent = '— (not baked)';
+        $('driftMax').textContent = 'peak — (not baked)';
       }
       $('run').disabled = false;
     } else {
@@ -441,6 +538,7 @@ if (typeof window.bakedData !== 'undefined') {
 
 $('v0').addEventListener('input', init);
 $('wall').addEventListener('input', init);
+$('arm').addEventListener('change', init);
 $('run').addEventListener('click', run);
 $('reset').addEventListener('click', init);
 init();

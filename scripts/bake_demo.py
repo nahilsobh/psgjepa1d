@@ -98,22 +98,8 @@ def model_rollout(m, sm, ss, um, us, s0, jerks):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--ckpt', default='ckpt/full_recon_two.pt')
-    ap.add_argument('--out', default='demo_data.js',
-                    help='output path; a .js is written that assigns window.bakedData')
-    ap.add_argument('--v0-step', type=float, default=0.5)
-    ap.add_argument('--wall-step', type=float, default=0.5)
-    ap.add_argument('--v0-min', type=float, default=3.0)
-    ap.add_argument('--v0-max', type=float, default=14.0)
-    ap.add_argument('--wall-min', type=float, default=6.0)
-    ap.add_argument('--wall-max', type=float, default=22.0)
-    ap.add_argument('--arm-label', default='full_recon_two')
-    args = ap.parse_args()
-
-    print(f"loading {args.ckpt}", flush=True)
-    ck = torch.load(args.ckpt, map_location='cpu', weights_only=False)
+def load_model(path):
+    ck = torch.load(path, map_location='cpu', weights_only=False)
     cfg = ck['cfg']; norm = ck['norm']
     m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden']),
                decoder_hidden=cfg['wm'].get('decoder_hidden'),
@@ -124,44 +110,82 @@ def main():
     ss = np.asarray(norm['ss'], np.float32)
     um = np.asarray(norm['um'], np.float32)
     us = np.asarray(norm['us'], np.float32)
+    return m, sm, ss, um, us
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--arms', nargs='+',
+                    default=['baseline', 'full', 'full_recon', 'full_recon_two'],
+                    help='ckpt basenames under ckpt/ (without .pt suffix)')
+    ap.add_argument('--ckpt-dir', default='ckpt')
+    ap.add_argument('--out', default='demo_data.js',
+                    help='output path; a .js is written that assigns window.bakedData')
+    ap.add_argument('--v0-step', type=float, default=0.5)
+    ap.add_argument('--wall-step', type=float, default=0.5)
+    ap.add_argument('--v0-min', type=float, default=3.0)
+    ap.add_argument('--v0-max', type=float, default=14.0)
+    ap.add_argument('--wall-min', type=float, default=6.0)
+    ap.add_argument('--wall-max', type=float, default=22.0)
+    args = ap.parse_args()
 
     v0s = np.round(np.arange(args.v0_min, args.v0_max + 1e-6, args.v0_step), 1)
     walls = np.round(np.arange(args.wall_min, args.wall_max + 1e-6, args.wall_step), 1)
 
-    n_feasible = 0; n_total = 0
+    # Precompute analytical plans (once, shared across arms) plus true trajectories.
+    plans = {}
+    truths = {}
+    for v0 in v0s:
+        for wall in walls:
+            jerks, excess = optimal_stop_plan(float(v0), float(wall))
+            if jerks is None:
+                continue
+            key = f"{v0:.1f}_{wall:.1f}"
+            plans[key] = (jerks, excess)
+            # true (physics) trajectory: [(x, v, a)] per applied jerk
+            xt, vt, at_ = 0.0, float(v0), 0.0
+            true_traj = []
+            for j in jerks:
+                xt, vt, at_ = W.exact_step(xt, vt, at_, j)
+                true_traj.append([round(xt, 4), round(vt, 4), round(at_, 4)])
+            truths[key] = true_traj
+    print(f"analytical plans: {len(plans)}/{len(v0s)*len(walls)} feasible", flush=True)
+
     out = {
         'meta': {
-            'arm': args.arm_label,
-            'ckpt': args.ckpt,
+            'ckpt_dir': args.ckpt_dir,
             'v0_range': [float(v0s[0]), float(v0s[-1]), float(args.v0_step)],
             'wall_range': [float(walls[0]), float(walls[-1]), float(args.wall_step)],
             'dt': W.DT, 'A_max': W.A_MAX, 'J_max': W.J_MAX,
         },
-        'traj': {},
+        'arms': {},
+        'truth': truths,
     }
-    for v0 in v0s:
-        for wall in walls:
-            n_total += 1
-            jerks, excess = optimal_stop_plan(float(v0), float(wall))
-            if jerks is None:
-                continue
-            n_feasible += 1
+    for arm in args.arms:
+        path = os.path.join(args.ckpt_dir, f'{arm}.pt')
+        if not os.path.exists(path):
+            print(f"skip {arm} (no ckpt at {path})", flush=True)
+            continue
+        print(f"\nbaking {arm} from {path}", flush=True)
+        m, sm, ss, um, us = load_model(path)
+        arm_out = {}
+        for key, (jerks, excess) in plans.items():
+            v0_s, wall_s = key.split('_')
+            v0 = float(v0_s); wall = float(wall_s)
             model_traj = model_rollout(m, sm, ss, um, us, [wall, v0, 0.0], jerks)
-            # Round to save space; 4 decimal places is plenty
-            traj_rounded = [[round(g, 4), round(v, 4), round(a, 4)] for g, v, a in model_traj]
-            key = f"{v0:.1f}_{wall:.1f}"
-            out['traj'][key] = {
+            arm_out[key] = {
                 'excess': round(excess, 6),
-                'model': traj_rounded,
+                'model': [[round(g, 4), round(v, 4), round(a, 4)] for g, v, a in model_traj],
             }
-        print(f"  v0={v0:.1f}  cumulative feasible={n_feasible}/{n_total}", flush=True)
+        out['arms'][arm] = arm_out
+        print(f"  {arm}: {len(arm_out)} trajectories baked", flush=True)
 
     with open(args.out, 'w') as f:
         f.write('window.bakedData = ')
         json.dump(out, f, separators=(',', ':'))
         f.write(';\n')
     size_kb = os.path.getsize(args.out) / 1024
-    print(f"\nwrote {args.out}  {n_feasible}/{n_total} feasible  ({size_kb:.1f} KB)")
+    print(f"\nwrote {args.out}  arms={list(out['arms'].keys())}  ({size_kb:.1f} KB)")
 
 
 if __name__ == '__main__':
