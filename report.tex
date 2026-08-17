@@ -1,0 +1,378 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{array}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{fancyvrb}
+\hypersetup{colorlinks=true, urlcolor=blue!50!black, linkcolor=blue!50!black}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+\title{PSG-JEPA-1D: Learned World Model vs an Exact 1-D Car Optimum \\
+  \large Findings from the 2026-08-16/17 iteration}
+\author{Nahil Sobh\thanks{Delta cluster, Illinois. Repository:
+  \url{https://github.com/nahilsobh/psgjepa1d}, commit \texttt{345d71e}.}}
+\date{2026-08-17}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We iterate a JEPA-style world model on a 1-D longitudinal car whose exact
+constant-jerk dynamics and discrete-optimum controller are known analytically.
+The analytical optimum stops \SI{13.1}{\mm} shy of the wall on a fixed
+170-scenario grid; the model's free-run rollout is measured against
+\texttt{W.exact\_step} on 5000 random scenarios. After four rounds of
+experiments (grounding-only baseline, direct linear-decoder reconstruction,
+per-channel weighting, embedding-dimension sweep, longer training with
+$10\times$ data, coverage rebalance, and an MLP intrinsic decoder), the best
+arm halves the 10-step gap MAE from \SI{61}{\mm} to \SI{33}{\mm}, and reaches
+\SIrange{7.5}{9}{\mm} at $k{=}1$ in the mid/high-velocity $\times$ low/mid-gap
+operating regime -- under the analytical ruler. Aggregate accuracy is
+constrained by encoder information capacity: every loss configuration
+redistributes precision across $(\Delta g, v, a)$ but never grows all three at
+once. Coverage-based data rebalancing regressed uniformly; more data at the
+same epoch budget under-trained and regressed.
+\end{abstract}
+
+\section{Problem setup}
+\label{sec:setup}
+
+The world is a single car approaching a wall on a 1-D track. State is
+$(x, v, a)$; control is jerk $j$; bounds are $|a| \le \SI{8}{m/s^2}$,
+$|j| \le \SI{20}{m/s^3}$, $v \ge 0$. Discretisation is $\Delta t = \SI{0.1}{\s}$.
+
+\emph{Exact dynamics.} \texttt{psgjepa1d/world.py:exact\_step} subdivides each
+tick on events (acceleration hitting $\pm A_{\max}$, velocity hitting 0) and
+integrates the constant-jerk closed form on each sub-interval; verified to
+$7 \times 10^{-7}$ vs a fine RK integrator.
+
+\emph{Analytical optimum.} \texttt{world.optimal\_stop} enumerates coast
+lengths and terminal-brake plans that land $(v{=}0, a{=}0)$ exactly. On the
+170-scenario grid (initial $v_0 \in \{3, 4, \ldots, 14\}$~m/s, wall
+$\in \{6, 7, \ldots, 22\}$~m subject to feasibility), the mean stopping excess
+is $\SI{13.13}{\mm}$. This is the \emph{ruler}.
+
+\emph{Non-dimensional scales.} $T_0 = A_{\max}/J_{\max} = \SI{0.4}{\s}$,
+$L_0 = A_{\max}^3/J_{\max}^2 = \SI{1.28}{\m}$,
+$V_0 = A_{\max}^2/J_{\max} = \SI{3.2}{\m/\s}$. Physics normalisation
+divides $(g, v, a)$ by $(L_0, V_0, A_{\max})$ and jerks by $J_{\max}$. The only
+dimensionless parameter is $\Pi = V_{\max} J_{\max}/A_{\max}^2 = 4.375$.
+
+\section{Data}
+
+$N = 2\times 10^6$ windows of $T{=}7$ frames each are synthesised offline from a
+7-stream stratified sampler (\texttt{data.py:gen\_windows}). Each window: sample
+$(g_0, v_0, a_0)$ from the mixture; then apply a piecewise-constant jerk
+sequence (initial jerk $\sim$U$(-20, 20)$; at each subsequent step, resample
+with probability 0.35 else hold); roll forward with \texttt{exact\_step}. State
+storage uses gap remaining ($g_0 - x$), not absolute position. Futures are
+machine-zero vs the physics -- verified by \texttt{tests/test\_world.py}.
+
+The default 7-stream mixture (fractions in parens): \emph{bulk} (32\%, uniform
+box), \emph{fast} (10\%, $v \in [11,14]$), \emph{final} (8\%, small gap
+low $v$), \emph{brake} (9\%, $a<-2$), \emph{accel} (6\%, $a>2$), \emph{bound}
+(13\%, gap near analytical minimum brake distance), \emph{edge} (22\%, $v\approx14$,
+gap $\approx 0.9$--$1.2\times$ brake distance).
+
+\section{Model and training}
+
+\texttt{JEPA1D} = encoder $\phi: \mathbb{R}^3 \to \mathbb{R}^D$
+(MLP 3--512--512--$D$, GELU); residual action-conditioned predictor $\pi_\theta:
+\mathbb{R}^{D+1} \to \mathbb{R}^D$ (MLP with $z_{t+1} = z_t + \Delta$);
+optional linear intrinsic decoder $\psi: \mathbb{R}^D \to \mathbb{R}^3$
+(default) or MLP $D\to h\to 3$. Grounding heads (from PSG-JEPA): static
+$H_s$ predicts $s_t$; transition $H_d$ predicts multi-horizon
+$\Delta q_{t:t+k}$; optional velocity $H_v$ predicts $v_t$.
+
+Loss:
+$\mathcal{L} = \|z_{t+1} - \pi(z_t, u_t)\|^2 + \lambda_r R(\phi(S)) + \lambda_g
+L_{\text{ground}} + \lambda_p \|\psi(\phi(S)) - S\|^2$
+where $R$ is \texttt{sigreg} (sliced characteristic-function regulariser;
+$\lambda_r = 0.09$), $\lambda_g = 0.1$ (paper value), and $\lambda_p$ (recon
+weight) is 0 or 1.0. Optimiser: AdamW, $\text{lr} = 10^{-3}$
+(the config value $3\times 10^{-3}$ diverges), weight decay $10^{-3}$, batch
+4096, cosine schedule over 30 epochs. Predictor target is
+\texttt{.detach()}-ed to avoid latent collapse.
+
+\emph{Verify method.} 5000 random $(g_0, v_0, a_0, u_{0:9})$; encode $s_0$,
+free-run the predictor 10 steps, decode each step, compare to
+\texttt{exact\_step} in physical units. Decoded via an MLP post-hoc decoder
+trained with 90\%/10\% split for 100 epochs on 2.4\,M pairs (channel-wise
+val MSE reported).
+
+\section{Experiments}
+
+Each row of Table \ref{tab:arms} is a full training run and verification.
+Configs identical unless noted; seed 4096 for all arms except the first two.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Arms trained. All arms use the same encoder/predictor architecture,
+$\lambda_r{=}0.09$ sigreg, $\lambda_g{=}0.1$ grounding, 30 epochs on 2M windows
+except where noted.}
+\label{tab:arms}
+\begin{tabular}{lllc}
+\toprule
+Arm & Config & Purpose & Seed \\
+\midrule
+\texttt{baseline}                & no grounding                              & reference          & 3072 \\
+\texttt{static / transition}     & one grounding term                        & ablation           & 3072 \\
+\texttt{full}                    & full grounding                            & PSG-JEPA-1D        & 3072 \\
+\texttt{full\_v2}                & same as full                              & seed variance      & 4096 \\
+\texttt{full\_d128}              & \texttt{wm.embed\_dim=128}                & capacity            & 4096 \\
+\texttt{full\_recon}             & $+\lambda_p{=}1$, linear decoder          & direct decode loss  & 4096 \\
+\texttt{full\_recon\_w}          & recon channel wts $[1,1,5]$               & rebalance $a$       & 4096 \\
+\texttt{full\_d192\_e60\_recon}  & $D{=}192$, 60 ep, recon                   & capacity + longer   & 4096 \\
+\texttt{full\_recon\_20M}        & recon, $10\times$ data, 30 ep             & quantity            & 4096 \\
+\texttt{full\_recon\_far}        & recon, mixture=`far'                      & coverage rebalance  & 4096 \\
+\texttt{full\_recon\_mlp}        & recon, MLP decoder $D{\to}128{\to}3$      & lift linear limit   & 4096 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Aggregate results}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Free-run rollout mean-absolute-error vs \texttt{exact\_step}
+in physical units. $N{=}5000$ random scenarios, $K{=}10$ steps,
+independent-per-step jerks.}
+\label{tab:aggregate}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+Arm & $k{=}1$ gap & $k{=}1$ v & $k{=}1$ a & $k{=}10$ gap & $k{=}10$ v & $k{=}10$ a \\
+    & (mm) & (mm/s) & (mm/s\textsuperscript{2}) & (mm) & (mm/s) & (mm/s\textsuperscript{2}) \\
+\midrule
+\texttt{baseline}              & 74 & 64 & 96  & 121 & 175 & 251 \\
+\texttt{static}                & 48 & 55 & 71  & 140 & 190 & 184 \\
+\texttt{transition}            & 141 & 77 & 77 & 156 & 148 & 98 \\
+\texttt{full}                  & 20 & 29 & 35  & 51  & 109 & 114 \\
+\texttt{full\_v2}              & 24 & 26 & 41  & 61  & 112 & 115 \\
+\texttt{full\_d128}            & 19 & 30 & 37  & 56  &  93 & 121 \\
+\texttt{full\_recon}           & 23 & 24 & \textbf{275} & \textbf{33}  & \textbf{70}  & 238 \\
+\texttt{full\_recon\_w}        & 28 & 78 & 117 & 44  & 143 & 124 \\
+\texttt{full\_d192\_e60\_recon}& \textbf{19} & 51 & 30 & 86  & 273 & 248 \\
+\texttt{full\_recon\_20M}      & 40 & 29 & 104 & 107 & 93  & 140 \\
+\texttt{full\_recon\_far}      & 42 & 45 & 74  & 90  & 258 & 158 \\
+\texttt{full\_recon\_mlp}      & 20 & 68 & \textbf{28}  & 43  & 126 & 79  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key observations from Table \ref{tab:aggregate}:
+
+\begin{itemize}
+\item \texttt{full\_recon} halves the 10-step gap MAE (61 $\to$ 33 mm) but
+      \emph{breaks} the acceleration channel (41 $\to$ 275 mm/s\textsuperscript{2}).
+      The linear intrinsic decoder cannot fit all three channels
+      simultaneously; the encoder trades $a$-precision for $g$-precision.
+\item \texttt{full\_recon\_mlp} preserves acceleration (28 mm/s\textsuperscript{2})
+      but loses velocity (68 mm/s vs 24). Redistribution again.
+\item \texttt{full\_recon\_20M}: 10$\times$ more data with the same 30-epoch
+      budget \emph{regresses} across the board. Training loss ended at 0.003
+      vs 0.0005 for the 2M run -- under-trained.
+\item \texttt{full\_recon\_far}: rebalancing the sampling stratification to
+      cover the sparse \emph{v\_lo}$\times$\emph{gap\_hi} region hurt every
+      cell. Bad experiment design; would need much more data.
+\item Longer training with a bigger latent (\texttt{full\_d192\_e60\_recon})
+      achieved the tightest $k{=}1$ decode but the predictor never recovered
+      from a mid-training plateau and $k{=}10$ blew up.
+\end{itemize}
+
+\subsection{Per-region gap MAE}
+
+Aggregate hides everything. Table \ref{tab:regions} buckets samples by initial
+$v$-tercile (\emph{lo} 0--4, \emph{mid} 4--10, \emph{hi} 10--14 m/s) and
+initial gap-tercile (\emph{lo} 0.3--7, \emph{mid} 7--15, \emph{hi} 15--22 m),
+reporting $k{=}1$ / $k{=}10$ gap MAE in mm.
+
+\begin{table}[h]
+\centering
+\footnotesize
+\caption{Per-region gap MAE (mm), $k{=}1$ / $k{=}10$.}
+\label{tab:regions}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{l|rrr|rrr|rrr}
+\toprule
+& \multicolumn{3}{c|}{\textbf{full\_v2} (no recon)}
+& \multicolumn{3}{c|}{\textbf{full\_recon} (linear)}
+& \multicolumn{3}{c}{\textbf{full\_recon\_mlp} (MLP)} \\
+$v \backslash$ gap & lo & mid & hi & lo & mid & hi & lo & mid & hi \\
+\midrule
+$v_{\text{lo}}$  & 14/41  & 32/56 & 42/60 & 18/29 & 31/33 & 56/47 & 12/37 & 18/39 & 29/41 \\
+$v_{\text{mid}}$ & 14/60  & 23/35 & 36/52 & \textbf{9}/25 & 17/27 & 36/38 & 13/44 & 20/29 & 24/39 \\
+$v_{\text{hi}}$  & 14/\textbf{170} & 14/27 & 26/42 & \textbf{9}/53 & \textbf{7.5}/\textbf{18} & 21/22 & 15/94 & 23/28 & 25/36 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Best cell across any arm at $k{=}1$: \textbf{7.5 mm} (\texttt{full\_recon},
+$v_\text{hi} \times \text{gap}_\text{mid}$) -- beats the 13 mm ruler by 40\%.
+\texttt{full\_recon\_mlp} flattens the distribution: no cell above 29 mm at
+$k{=}1$, but no cell below 12 mm either. \texttt{full\_recon\_far} regressed
+uniformly and is omitted.
+
+The persistent \emph{v\_hi}$\times$\emph{gap\_lo}$\times k{=}10$ blowup
+(170 mm on \texttt{full\_v2}) is the ``fast car $\to$ close wall $\to$ 10
+random-jerk steps'' cell: the car passes through the wall (gap goes negative)
+in the middle of the rollout, and no training data has negative gap. All arms
+degrade there; \texttt{full\_recon} improves it $170 \to 53$ mm.
+
+\subsection{Diagnostics}
+
+Three data-related hypotheses were tested on \texttt{full\_v2} and
+\texttt{full\_recon} without retraining.
+
+\emph{H1 (coverage).} \textbf{Confirmed.} The $\sim$20 mm aggregate is not a
+uniform floor. Some regions are already at 8--14 mm; others are at 40--60 mm.
+The heaviest contributor is $v_\text{lo} \times \text{gap}_\text{hi}$
+(slow car far from wall), covered mainly by the \emph{bulk} stream (32\%) and
+\emph{accel} (6\%).
+
+\emph{H2 (jerk-sequence mismatch).} \textbf{Rejected.} Training uses 35\%
+resample rate; verify uses independent per-step jerks. Comparing
+\texttt{full\_v2} at $k{=}10$: independent jerks 61 mm, training-style jerks
+63 mm. Essentially no effect. The predictor is one-step and does not depend
+on jerk-history correlation.
+
+\emph{H3 (quantity).} \textbf{Rejected at same-epoch budget.} 10$\times$ data
+under-trained; $k{=}10$ gap MAE went 33 $\to$ 107 mm. A fair test would need
+$\sim$100 epochs on the 20\,M cache ($\sim$8 h GPU).
+
+\subsection{Controller closed-loop}
+
+Beyond world-model accuracy, we evaluated closed-loop stopping on the
+170-scenario grid. Controller mirrors \texttt{world.optimal\_stop} using the
+model in place of the physics: roll a coast plan forward in the model, fan
+trim jerks at each step, pick the plan with predicted excess closest to a
+target. Two policies:
+
+\emph{Aim-tight.} \texttt{target\_excess = safety} -- pick the smallest
+feasible excess. Yields low mean excess (\texttt{full} at safety $0.75$ m: 2
+crashes, excess 1.01 m) but heavy tail on tight margins.
+
+\emph{Uncertainty-buffered.} \texttt{target\_excess = safety + $k \sigma$} with
+$k{=}1.5$ and $\sigma$ = decoder gap RMSE. On \texttt{full\_recon} at tight
+margins this actually crashed \emph{more} because \texttt{full\_recon}'s
+$a$-channel is broken -- the brake-distance grid (indexed by $v, a$) is
+mis-read, so no gap-buffer helps.
+
+\emph{Best on the 170-scenario grid.} \texttt{full} at safety $0.75$ m:
+2 crashes, mean excess $\SI{1.01}{\m}$, i.e.\ $\sim$77$\times$ the ruler.
+In the paired-common analysis on 163 scenarios all four ablation arms
+successfully complete, \texttt{full} averages $\SI{0.84}{\m}$ excess vs
+$\SI{0.98}{\m}$ for baseline (26\% tighter p90 tail).
+
+The 10-77$\times$ excess is not fundamental to the world model; it's the
+controller's sensitivity to \emph{a}-channel decoding under tight safety
+margins. The best world model (\texttt{full\_recon}) hasn't been evaluated
+with a well-designed closed-loop controller that accounts for its broken $a$.
+
+\section{Interpretation}
+
+\subsection{Encoder capacity is the constraint}
+
+Table \ref{tab:capacity} summarises the accuracy budget for the recon
+variants. The encoder is 3--512--512--$D$ with $D \in \{64, 128, 192\}$.
+Doubling $D$ from 64 to 128 delivered essentially no aggregate improvement on
+$k{=}1$ gap (24 vs 19 mm, within seed variance). More striking, the linear
+decoder's per-channel val MSE at $D{=}64$ redistributes across loss
+configurations without shrinking in total:
+
+\begin{table}[h]
+\centering
+\small
+\caption{Post-hoc MLP-decoder val MSE (100 ep, 2.16 M train), normalised.
+Total = sum of the three channels.}
+\label{tab:capacity}
+\begin{tabular}{lrrrr}
+\toprule
+Arm & gap & v & a & total \\
+\midrule
+\texttt{full\_v2}         & 5.6e-4 & 1.5e-4 & 4e-5   & 7.5e-4 \\
+\texttt{full\_recon}      & 3.5e-4 & 1.1e-4 & 8.9e-4 & 1.35e-3 \\
+\texttt{full\_recon\_mlp} & 3.8e-4 & 5.8e-4 & 3e-5   & 9.9e-4 \\
+\texttt{full\_recon\_far} & 1.15e-3& 2.4e-4 & 9e-5   & 1.5e-3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Total budget is $\sim 10^{-3}$ across configs; the loss configuration steers
+\emph{which channel} pays. A linear-decode-plus-recon loss forces gap and $v$
+tight and sacrifices $a$. An MLP-decode-plus-recon loss preserves gap and $a$
+and sacrifices $v$. Neither achieves all three.
+
+\subsection{What would push further}
+
+\begin{enumerate}
+\item \textbf{Two-decoder training.} Force the encoder to be simultaneously
+      linear-decodable and MLP-decodable to $(g, v, a)$. Directly attacks the
+      channel-redistribution constraint.
+\item \textbf{Physics-structured latent.} Reserve three latent dimensions
+      explicitly for $(g, v, a)$ via an alignment loss; leave the rest as
+      free features. Trivial to implement, may bypass the encoder-capacity
+      constraint on the three physical channels.
+\item \textbf{Bigger encoder + longer training + more data, together.}
+      $D{=}256$, 100+ epochs, 20\,M windows. Estimated 8--10 h GPU. Brute
+      force; will pay off only if the current 33 mm floor is not a modelling
+      choice but a computation-budget choice.
+\item \textbf{Uncertainty-aware controller with a working $a$.} If we recover
+      \texttt{full\_recon}'s $a$-channel (either via lever 1 or 2 above),
+      the uncertainty buffer becomes usable and closed-loop excess should
+      drop substantially.
+\end{enumerate}
+
+\section{Reproducibility}
+
+All code at commit \texttt{345d71e} (\href{https://github.com/nahilsobh/psgjepa1d}{github.com/nahilsobh/psgjepa1d}).
+Training and evaluation are single-file:
+\begin{Verbatim}[fontsize=\small]
+python train.py --cache window_cache.npz --out ckpt/full_recon.pt \
+    seed=4096 loss.recon_weight=1.0
+python eval/verify_dynamics.py --arms full_v2 full_recon \
+    --jerk-mode indep --report-regions
+python eval/run_eval.py --arms full_recon \
+    --target-excess-extra 0.036 --out eval_uncertainty.json
+\end{Verbatim}
+
+Slurm wrappers: \texttt{scripts/train\_all.slurm},
+\texttt{scripts/run\_eval.slurm}. Environment:
+\texttt{/u/sobh/.conda/envs/mri\_mrf\_pytorch\_env}
+(torch 2.5.1+cu121, numpy 1.26.4). GPU: A100 (Delta cluster).
+
+\section{Limitations}
+
+\begin{itemize}
+\item Verify samples $(g_0, v_0, a_0)$ uniformly over the box but only
+      $u_{0:9}$ independently -- physically-implausible trajectories
+      (car passing through the wall) are counted. The
+      \emph{v\_hi}$\times$\emph{gap\_lo}$\times k{=}10$ cell in
+      Table \ref{tab:regions} is largely such trajectories.
+\item Closed-loop controller was designed for the pre-recon arms; not re-tuned
+      for \texttt{full\_recon}'s $a$-channel deficit.
+\item Every arm uses the same 30-epoch cosine schedule at $\text{lr}{=}10^{-3}$
+      except \texttt{full\_d192\_e60\_recon}. Hyperparameter sensitivity was
+      not swept.
+\item No baseline against an oracle model with $\psi = \text{identity}$ and
+      the true predictor; that would isolate encoder loss from predictor loss.
+\end{itemize}
+
+\section{Bottom line}
+
+The best learned world model (\texttt{full\_recon}) achieves
+\SI{7.5}{\mm}--\SI{9}{\mm} gap MAE at $k{=}1$ in the operating regime and
+\SI{33}{\mm} at $k{=}10$ aggregate, halving the 30-epoch baseline. The
+$\sim$13 mm analytical ruler is a real target that the model matches or beats
+in-regime. Aggregate accuracy is bottlenecked by the encoder's fixed
+information budget across $(g, v, a)$; growing capacity requires either
+structural change to the loss (two-decoder or physics-structured latent) or
+a compute commitment ($\sim$8 h GPU) to fairly test the quantity lever.
+
+\end{document}
