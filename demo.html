@@ -465,16 +465,19 @@ function init() {
   $('excessAn').textContent = 'excess —';
   $('excessMd').textContent = 'excess —';
   $('driftMax').textContent = 'peak —';
+  if (bakedDataError) {
+    $('hint').innerHTML = bakedDataError;
+    $('run').disabled = false;   // analytical still works
+    return;
+  }
   const armName = currentArm();
   const arm = bakedData && bakedData.arms && bakedData.arms[armName];
   const modelAvailable = arm && arm[bakedKey(v0, wall)];
-  const hint = bakedData && bakedData.arms
-    ? (modelAvailable
-        ? `Hit Run — model = <code>${armName}</code>. Verified horizon = k=${K_VERIFIED} ticks; beyond that the model extrapolates (dashed car outline).`
-        : `Analytical only (this v0/wall not in baked grid for ${armName} — try slider values that snap to 0.5 m/s and 0.5 m).`)
-    : 'Loading model trajectories…';
+  const hint = modelAvailable
+    ? `Hit Run — model = <code>${armName}</code>. Verified horizon = k=${K_VERIFIED} ticks; beyond that the model extrapolates (dashed car outline).`
+    : `Analytical only (this v0/wall not in baked grid for ${armName} — try slider values that snap to 0.5 m/s and 0.5 m).`;
   $('hint').innerHTML = hint;
-  $('run').disabled = !bakedData;
+  $('run').disabled = false;
 }
 
 function run() {
@@ -528,12 +531,20 @@ function run() {
   frame();
 }
 
-// demo_data.js (loaded via <script> above) assigns window.bakedData
-if (typeof window.bakedData !== 'undefined') {
-  bakedData = window.bakedData;
-} else {
+// demo_data.js (loaded via a script tag above) assigns window.bakedData
+let bakedDataError = null;
+if (typeof window.bakedData === 'undefined') {
   console.warn('demo_data.js not loaded; model track disabled');
-  bakedData = {meta: {arm: '?'}, traj: {}};
+  bakedData = {meta: {}, arms: {}, truth: {}};
+  bakedDataError = '<b style="color:var(--bad)">demo_data.js is missing.</b> ' +
+    'Place demo_data.js next to demo.html and hard-refresh.';
+} else if (!window.bakedData.arms) {
+  console.warn('demo_data.js has old schema (no .arms field); model track disabled');
+  bakedData = {meta: {}, arms: {}, truth: {}};
+  bakedDataError = '<b style="color:var(--bad)">demo_data.js is stale (single-arm schema).</b> ' +
+    'Re-copy demo_data.js from the repo (it should be ~2.5 MB with 4 baked arms).';
+} else {
+  bakedData = window.bakedData;
 }
 
 $('v0').addEventListener('input', init);
