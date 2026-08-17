@@ -116,7 +116,8 @@ for arm in args.arms:
     print(f"\nloading {path}", flush=True)
     ck = torch.load(path, map_location=DEV, weights_only=False)
     cfg = ck['cfg']
-    m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden'])).to(DEV)
+    m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden']),
+               decoder_hidden=cfg['wm'].get('decoder_hidden', None)).to(DEV)
     m.load_state_dict(ck['model'], strict=False); m.eval()  # decoder is optional
     print(f"fitting decoder for {arm} ...", flush=True)
     dec = fit_decoder(m, D, DEV, verbose=True)

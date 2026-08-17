@@ -8,8 +8,9 @@ from .grounding import PSGGroundingHeads, grounding_loss
 
 
 class JEPA1D(nn.Module):
-    """encoder 3->H->H->D ; residual action-conditioned predictor ; linear decoder D->3."""
-    def __init__(self, embed_dim=64, hidden=512, state_dim=3):
+    """encoder 3->H->H->D ; residual action-conditioned predictor ; decoder D->state.
+    decoder_hidden=None: linear decoder (default). int: MLP decoder D->h->state."""
+    def __init__(self, embed_dim=64, hidden=512, state_dim=3, decoder_hidden=None):
         super().__init__()
         self.embed_dim = embed_dim
         self.encoder = nn.Sequential(nn.Linear(state_dim,hidden), nn.GELU(),
@@ -18,7 +19,11 @@ class JEPA1D(nn.Module):
         self.p1 = nn.Linear(embed_dim+1, hidden); self.p2 = nn.Linear(hidden,hidden)
         self.p3 = nn.Linear(hidden, embed_dim)
         nn.init.normal_(self.p3.weight, 0, 0.02); nn.init.zeros_(self.p3.bias)
-        self.decoder = nn.Linear(embed_dim, state_dim)   # optional recon loss (see training_step)
+        if decoder_hidden is None:
+            self.decoder = nn.Linear(embed_dim, state_dim)
+        else:
+            self.decoder = nn.Sequential(nn.Linear(embed_dim, decoder_hidden), nn.GELU(),
+                                         nn.Linear(decoder_hidden, state_dim))
     def encode(self, s): return self.encoder(s)
     def predict(self, z, u):
         h = F.gelu(self.p1(torch.cat([z,u],-1))); h = F.gelu(self.p2(h))

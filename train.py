@@ -23,14 +23,15 @@ def load_cfg(overrides):
 
 def build(cfg, dev, cache='window_cache.npz'):
     n, T = cfg['data']['n_windows'], cfg['data']['window_T']
+    mixture = cfg['data'].get('mixture', 'default')
     if os.path.exists(cache):
         d = np.load(cache)
         if len(d['S'])==n and d['S'].shape[1]==T: S,U = d['S'],d['U']
         else: S=None
     else: S=None
     if S is None:
-        t0=time.time(); print(f"synthesising {n} windows (T={T}) ...", flush=True)
-        S,U = gen_windows(n, T, seed=cfg['seed'])
+        t0=time.time(); print(f"synthesising {n} windows (T={T}, mixture={mixture}) ...", flush=True)
+        S,U = gen_windows(n, T, seed=cfg['seed'], mixture=mixture)
         np.savez_compressed(cache, S=S, U=U); print(f"  {time.time()-t0:.0f}s")
     sm,ss,um,us = normalisers(S,U,cfg['data']['normaliser'])
     t = lambda a: torch.tensor(np.asarray(a,np.float32), device=dev)
@@ -47,7 +48,8 @@ def main():
     print(f"device={dev}  reg={cfg['loss']['reg_type']}  lambda_g={cfg['loss']['grounding']['weight']}"
           f"  use_velocity={cfg['loss']['grounding']['use_velocity']}")
     D = build(cfg, dev, A.cache)
-    m = JEPA1D(cfg['wm']['embed_dim'], cfg['wm']['hidden']).to(dev)
+    m = JEPA1D(cfg['wm']['embed_dim'], cfg['wm']['hidden'],
+               decoder_hidden=cfg['wm'].get('decoder_hidden', None)).to(dev)
     g = cfg['loss']['grounding']
     heads = (PSGGroundingHeads(cfg['wm']['embed_dim'], len(g['state_idx']), len(g['joint_idx']),
                                max(len(g['vel_idx']),1), g['use_velocity'], g['hidden_dim'],

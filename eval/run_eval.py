@@ -96,9 +96,9 @@ def _bilerp(vg, ag, M, v, a):
 # ------------------------------ Controller ------------------------------
 @torch.no_grad()
 def drive_scenario(m, dec, dev, sm, ss, um, us, brake_grid, v0, wall,
-                   nj=41, safety=0.25, target_excess=None, T_max=250):
-    # aim at the safety threshold => pick the tightest feasible plan
-    if target_excess is None: target_excess = safety
+                   nj=41, safety=0.25, target_excess=None, target_excess_extra=0.0, T_max=250):
+    # aim at (safety + target_excess_extra); extra buffers against decoder noise
+    if target_excess is None: target_excess = safety + target_excess_extra
     """Closed-loop stop-in-front-of-wall.
 
     Strategy (mirrors world.optimal_stop but with the MODEL as the world model):
@@ -197,13 +197,15 @@ def scenario_grid():
 
 
 @torch.no_grad()
-def control_eval_at_margin(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, safety):
+def control_eval_at_margin(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, safety,
+                           target_excess_extra=0.0):
     """Drive every scenario at a specific safety margin. Returns per-scenario detail so we
     can later intersect success masks across arms."""
     details = []
     for (v0, wall) in scenarios:
         excess, crashed = drive_scenario(
-            m, dec, dev, sm, ss, um, us, brake_grid, v0, wall, safety=safety
+            m, dec, dev, sm, ss, um, us, brake_grid, v0, wall, safety=safety,
+            target_excess_extra=target_excess_extra,
         )
         details.append(dict(v0=v0, wall=wall, excess=excess, crashed=bool(crashed)))
     excesses = [d['excess'] for d in details if not d['crashed']]
@@ -220,13 +222,15 @@ def control_eval_at_margin(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, s
     )
 
 
-def sweep_margins(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, margins):
+def sweep_margins(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, margins,
+                  target_excess_extra=0.0):
     """For each safety margin in `margins`, run the full scenario grid.  Returns a dict
     keyed by margin; each entry has per_scenario / crashes / excess_mean."""
     out = {}
     for s in margins:
         t0 = time.time()
-        r = control_eval_at_margin(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, s)
+        r = control_eval_at_margin(m, dec, dev, sm, ss, um, us, brake_grid, scenarios, s,
+                                   target_excess_extra=target_excess_extra)
         out[s] = r
         print(f"    margin={s:.3f}m  crashes={r['crashes']:3d}/{r['n_scenarios']}  "
               f"excess_mean={('%.4f'%r['excess_mean']) if r['excess_mean'] is not None else '  n/a  '}  "
@@ -272,7 +276,8 @@ def load_windows(dev, n=500000, T=7, seed=3072, cache='window_cache.npz'):
 def load_checkpoint(path, dev):
     ck = torch.load(path, map_location=dev, weights_only=False)
     cfg = ck['cfg']; norm = ck['norm']
-    m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden'])).to(dev)
+    m = JEPA1D(int(cfg['wm']['embed_dim']), int(cfg['wm']['hidden']),
+               decoder_hidden=cfg['wm'].get('decoder_hidden', None)).to(dev)
     m.load_state_dict(ck['model'], strict=False); m.eval()  # decoder is optional
     return m, cfg, norm
 
@@ -283,7 +288,7 @@ CRASH_THRESHOLD = 2  # tightest-safe = smallest margin with crashes <= threshold
 
 
 def evaluate_checkpoint(path, dev, D, scenarios, do_gauge=False, margins=MARGINS,
-                        crash_threshold=CRASH_THRESHOLD):
+                        crash_threshold=CRASH_THRESHOLD, target_excess_extra=0.0):
     print(f"\n--- {path} ---", flush=True)
     m, cfg, norm = load_checkpoint(path, dev)
     sm, ss, um, us = norm['sm'], norm['ss'], norm['um'], norm['us']
@@ -307,7 +312,8 @@ def evaluate_checkpoint(path, dev, D, scenarios, do_gauge=False, margins=MARGINS
 
     print(f"  margin sweep ({len(margins)} points, threshold<= {crash_threshold} crashes):",
           flush=True)
-    sweep = sweep_margins(m, dec, dev, sm, ss, um, us, bgrid, scenarios, margins)
+    sweep = sweep_margins(m, dec, dev, sm, ss, um, us, bgrid, scenarios, margins,
+                          target_excess_extra=target_excess_extra)
     m_star = pick_tightest_safe(sweep, threshold=crash_threshold)
     if m_star is None:
         print(f"  UNSAFE: no margin in {margins} achieved <= {crash_threshold} crashes",
@@ -379,17 +385,26 @@ def main():
     ap.add_argument('--n-decoder', type=int, default=150000)
     ap.add_argument('--gauge-on', default='full',
                     help='which arm name to run the gauge test on')
+    ap.add_argument('--arms', nargs='+',
+                    default=['baseline', 'static', 'transition', 'full'],
+                    help='ckpt basenames under --ckpt-dir')
+    ap.add_argument('--target-excess-extra', type=float, default=0.0,
+                    help='meters added to safety when scoring plans; buffer against decoder noise')
+    ap.add_argument('--margins', nargs='+', type=float, default=None,
+                    help='override the safety-margin sweep (default: MARGINS)')
     args = ap.parse_args()
 
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"device={dev}  ckpt-dir={args.ckpt_dir}", flush=True)
+    print(f"device={dev}  ckpt-dir={args.ckpt_dir}  target_excess_extra={args.target_excess_extra}",
+          flush=True)
 
-    arms = ['baseline', 'static', 'transition', 'full']
+    arms = list(args.arms)
     ckpts = {a: os.path.join(args.ckpt_dir, f"{a}.pt") for a in arms}
     missing = [a for a, p in ckpts.items() if not os.path.exists(p)]
     if missing:
         print(f"WARNING: missing checkpoints: {missing}", flush=True)
         arms = [a for a in arms if a not in missing]
+    margins = tuple(args.margins) if args.margins else MARGINS
 
     scenarios = scenario_grid()
     opt_mean, opt_n = optimum_mean_excess(scenarios)
@@ -401,12 +416,14 @@ def main():
     results = dict(
         meta=dict(device=str(dev), scenarios=len(scenarios),
                   optimum_mean_excess=opt_mean, optimum_n=opt_n,
-                  margins=list(MARGINS), crash_threshold=CRASH_THRESHOLD),
+                  margins=list(margins), crash_threshold=CRASH_THRESHOLD,
+                  target_excess_extra=args.target_excess_extra),
         arms={},
     )
     for a in arms:
         results['arms'][a] = evaluate_checkpoint(
-            ckpts[a], dev, D, scenarios, do_gauge=(a == args.gauge_on)
+            ckpts[a], dev, D, scenarios, do_gauge=(a == args.gauge_on),
+            margins=margins, target_excess_extra=args.target_excess_extra,
         )
 
     # Paired common-scenario analysis across arms with a valid chosen margin.

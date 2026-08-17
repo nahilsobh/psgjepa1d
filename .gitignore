@@ -7,6 +7,7 @@ __pycache__/
 venv/
 results*.json
 eval_results*.json
+eval_uncertainty*.json
 psgjepa1d_run*.json
 window_cache.npz
 logs/
