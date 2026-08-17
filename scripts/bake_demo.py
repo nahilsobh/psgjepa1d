@@ -82,8 +82,9 @@ def optimal_stop_plan(v0, wall, NJ=81):
 
 @torch.no_grad()
 def model_rollout(m, sm, ss, um, us, s0, jerks):
-    """Encode s0, step through jerks, decode each step. Returns list of
-    [gap, v, a] in physical units (one entry per applied jerk)."""
+    """Open-loop rollout: encode s0 once, then predict + decode for each jerk.
+    Returns list of [gap, v, a] in physical units (one entry per applied jerk).
+    Error compounds over the trajectory."""
     t = lambda a: torch.tensor(np.asarray(a, np.float32))
     s0_t = t(np.asarray(s0).reshape(1, 3))
     z = m.encode((s0_t - t(sm.reshape(1, 3))) / t(ss.reshape(1, 3)))
@@ -91,6 +92,38 @@ def model_rollout(m, sm, ss, um, us, s0, jerks):
     ss_t = t(ss.reshape(1, 3)); sm_t = t(sm.reshape(1, 3))
     um_t = t(um.reshape(1, 1)); us_t = t(us.reshape(1, 1))
     for j in jerks:
+        u = t(np.array([[j]], np.float32))
+        z = m.predict(z, (u - um_t) / us_t)
+        d = (m.decode(z) * ss_t + sm_t).cpu().numpy()[0]
+        out.append([float(d[0]), float(d[1]), float(d[2])])
+    return out
+
+
+@torch.no_grad()
+def model_rollout_closed_loop(m, sm, ss, um, us, s0, jerks, true_states):
+    """Closed-loop rollout: at each tick, encode the TRUE state, do a 1-step
+    prediction, decode. Never accumulates; each prediction is bounded by the
+    model's 1-step decode error. Matches how the controller uses the model.
+    Returns list of [gap, v, a] (one entry per applied jerk).
+
+    true_states[i] = (x, v, a) after i+1 jerks (world.exact_step chain);
+    the state fed to encode at step i is the state BEFORE applying jerk i:
+      i=0: initial s0
+      i>=1: (wall - true_states[i-1][0], true_states[i-1][1], true_states[i-1][2])
+    """
+    t = lambda a: torch.tensor(np.asarray(a, np.float32))
+    ss_t = t(ss.reshape(1, 3)); sm_t = t(sm.reshape(1, 3))
+    um_t = t(um.reshape(1, 1)); us_t = t(us.reshape(1, 1))
+    wall = s0[0]
+    out = []
+    for i, j in enumerate(jerks):
+        if i == 0:
+            s_in = s0
+        else:
+            x_prev, v_prev, a_prev = true_states[i - 1]
+            s_in = [wall - x_prev, v_prev, a_prev]
+        s_t = t(np.asarray(s_in, np.float32).reshape(1, 3))
+        z = m.encode((s_t - sm_t) / ss_t)
         u = t(np.array([[j]], np.float32))
         z = m.predict(z, (u - um_t) / us_t)
         d = (m.decode(z) * ss_t + sm_t).cpu().numpy()[0]
@@ -172,13 +205,17 @@ def main():
         for key, (jerks, excess) in plans.items():
             v0_s, wall_s = key.split('_')
             v0 = float(v0_s); wall = float(wall_s)
+            true_states = [(t[0], t[1], t[2]) for t in truths[key]]
             model_traj = model_rollout(m, sm, ss, um, us, [wall, v0, 0.0], jerks)
+            model_cl_traj = model_rollout_closed_loop(m, sm, ss, um, us,
+                                                     [wall, v0, 0.0], jerks, true_states)
             arm_out[key] = {
                 'excess': round(excess, 6),
                 'model': [[round(g, 4), round(v, 4), round(a, 4)] for g, v, a in model_traj],
+                'model_cl': [[round(g, 4), round(v, 4), round(a, 4)] for g, v, a in model_cl_traj],
             }
         out['arms'][arm] = arm_out
-        print(f"  {arm}: {len(arm_out)} trajectories baked", flush=True)
+        print(f"  {arm}: {len(arm_out)} trajectories baked (open + closed loop)", flush=True)
 
     with open(args.out, 'w') as f:
         f.write('window.bakedData = ')

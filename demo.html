@@ -67,10 +67,14 @@
           border-radius:3px; padding:2px 6px; font-size:12px;">
           <option value="full_recon" selected>full_recon (best k=10 gap)</option>
           <option value="full_recon_two">full_recon_two (best controller)</option>
-          <option value="full">full (grounding only)</option>
-          <option value="baseline">baseline (no grounding)</option>
+          <option value="full">full (ablation — no trained decoder)</option>
+          <option value="baseline">baseline (ablation — no trained decoder)</option>
         </select>
-        decoded
+        <select id="mode" style="background:#0a0c10; color:var(--fg); border:1px solid var(--line);
+          border-radius:3px; padding:2px 6px; font-size:12px; margin-left:4px;">
+          <option value="closed" selected>closed-loop (re-encode each tick)</option>
+          <option value="open">open-loop (free-run)</option>
+        </select>
       </span>
       <span class="arm" id="excessMd">excess &mdash;</span>
     </div>
@@ -411,7 +415,8 @@ function stopAnim() {
 }
 
 function bakedKey(v0, wall) { return `${v0.toFixed(1)}_${wall.toFixed(1)}`; }
-function currentArm() { return $('arm').value; }
+function currentArm()  { return $('arm').value; }
+function currentMode() { return $('mode').value; }   // 'closed' or 'open'
 
 function buildTraj(v0, wall) {
   // Returns {anTraj, mdTraj, errors, anExcess, mdError_final, jTrim, k, nBrake} or null.
@@ -430,11 +435,13 @@ function buildTraj(v0, wall) {
 
   // Model trajectory from baked data (prepend initial to align frame 0)
   const armName = currentArm();
+  const mode = currentMode();
   const arm = bakedData && bakedData.arms && bakedData.arms[armName];
   const bakeEntry = arm && arm[bakedKey(v0, wall)];
   const mdTraj = [{gap: wall, v: v0, a: 0, kind: 'coast'}];
   if (bakeEntry) {
-    for (const [gap, v, a] of bakeEntry.model)
+    const field = mode === 'closed' ? (bakeEntry.model_cl || bakeEntry.model) : bakeEntry.model;
+    for (const [gap, v, a] of field)
       mdTraj.push({gap, v, a, kind: 'brake'});
   }
   // Per-tick |true_x - model_x| in mm (over the aligned length)
@@ -471,11 +478,15 @@ function init() {
     return;
   }
   const armName = currentArm();
+  const mode = currentMode();
   const arm = bakedData && bakedData.arms && bakedData.arms[armName];
   const modelAvailable = arm && arm[bakedKey(v0, wall)];
+  const modeText = mode === 'closed'
+    ? 'closed-loop &mdash; re-encodes the true state each tick, bounded by 1-step decode error (~20 mm). This is what the controller does.'
+    : 'open-loop &mdash; encodes once, free-runs. Error compounds; blows up past the verified horizon.';
   const hint = modelAvailable
-    ? `Hit Run — model = <code>${armName}</code>. Verified horizon = k=${K_VERIFIED} ticks; beyond that the model extrapolates (dashed car outline).`
-    : `Analytical only (this v0/wall not in baked grid for ${armName} — try slider values that snap to 0.5 m/s and 0.5 m).`;
+    ? `Hit Run &mdash; <code>${armName}</code>, ${modeText}`
+    : `Analytical only (this v0/wall not in baked grid for ${armName} &mdash; try slider values that snap to 0.5 m/s and 0.5 m).`;
   $('hint').innerHTML = hint;
   $('run').disabled = false;
 }
@@ -550,6 +561,7 @@ if (typeof window.bakedData === 'undefined') {
 $('v0').addEventListener('input', init);
 $('wall').addEventListener('input', init);
 $('arm').addEventListener('change', init);
+$('mode').addEventListener('change', init);
 $('run').addEventListener('click', run);
 $('reset').addEventListener('click', init);
 init();
